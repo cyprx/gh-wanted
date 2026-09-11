@@ -77,6 +77,31 @@ impl GhClient {
         })
     }
 
+    pub fn issues(
+        &self,
+        account: &Account,
+        repo: &Repository,
+    ) -> Result<Vec<crate::issues::Issue>> {
+        anyhow::ensure!(
+            crate::issues::valid_repo_name(&repo.full_name),
+            "Invalid repository name"
+        );
+        anyhow::ensure!(
+            self.account()? == *account,
+            "GitHub account changed; refresh repositories"
+        );
+        let endpoint = format!(
+            "repos/{}/issues?state=all&sort=updated&direction=desc&per_page=100",
+            repo.full_name
+        );
+        let bytes = self.api(&endpoint, true)?;
+        anyhow::ensure!(
+            self.account()? == *account,
+            "GitHub account changed during issue refresh"
+        );
+        parse_issues(repo.id, &bytes)
+    }
+
     fn api(&self, endpoint: &str, paginate: bool) -> Result<Vec<u8>> {
         anyhow::ensure!(
             !self.cancellation.load(Ordering::Relaxed),
@@ -190,4 +215,59 @@ fn collect(
             }
         }
     }
+}
+
+pub fn parse_issues(repo_id: u64, bytes: &[u8]) -> Result<Vec<crate::issues::Issue>> {
+    #[derive(Deserialize)]
+    struct Label {
+        name: String,
+    }
+    #[derive(Deserialize)]
+    struct Assignee {
+        login: String,
+    }
+    #[derive(Deserialize)]
+    struct Record {
+        number: u64,
+        title: String,
+        body: Option<String>,
+        state: String,
+        created_at: String,
+        updated_at: String,
+        labels: Vec<Label>,
+        #[serde(default)]
+        assignees: Vec<Assignee>,
+        html_url: String,
+    }
+    let invalid = || anyhow!("GitHub returned an invalid issue response");
+    let pages: Vec<Vec<serde_json::Value>> =
+        serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let mut issues = std::collections::BTreeMap::new();
+    for value in pages.into_iter().flatten() {
+        if value.get("pull_request").is_some() {
+            continue;
+        }
+        let record: Record = serde_json::from_value(value).map_err(|_| invalid())?;
+        anyhow::ensure!(
+            record.number > 0 && matches!(record.state.as_str(), "open" | "closed"),
+            "GitHub returned an invalid issue response"
+        );
+        let issue = crate::issues::Issue {
+            repo_id,
+            number: record.number,
+            title: record.title,
+            body: record.body,
+            state: record.state,
+            created_at: record.created_at,
+            updated_at: record.updated_at,
+            labels: record.labels.into_iter().map(|l| l.name).collect(),
+            assignees: record.assignees.into_iter().map(|a| a.login).collect(),
+            url: record.html_url,
+        };
+        let previous: Option<&crate::issues::Issue> = issues.get(&issue.number);
+        if previous.is_none_or(|old| old.updated_at <= issue.updated_at) {
+            issues.insert(issue.number, issue);
+        }
+    }
+    Ok(issues.into_values().collect())
 }

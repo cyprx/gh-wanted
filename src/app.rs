@@ -12,9 +12,24 @@ pub enum Mode {
     Browse,
     Search,
     Tags,
+    IssueSearch,
+    SaveFocus,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum View {
+    Repositories,
+    Issues,
+    Focuses,
 }
 
 pub struct App {
+    pub view: View,
+    pub issues: HashMap<u64, Vec<crate::issues::Issue>>,
+    pub issue_status: HashMap<u64, String>,
+    pub issue_query: String,
+    pub focuses: Vec<crate::focus::Focus>,
+    pub detail_scroll: u16,
     pub repositories: Vec<Repository>,
     pub tags: HashMap<u64, Vec<String>>,
     pub account: Option<Account>,
@@ -35,11 +50,19 @@ pub enum Action {
     None,
     Quit,
     Refresh,
+    FetchIssues,
+    OpenIssue(String),
 }
 
 impl App {
     pub fn new(store: Store, demo: bool) -> Self {
         Self {
+            view: View::Repositories,
+            issues: HashMap::new(),
+            issue_status: HashMap::new(),
+            issue_query: String::new(),
+            focuses: vec![],
+            detail_scroll: 0,
             repositories: vec![],
             tags: HashMap::new(),
             account: None,
@@ -72,6 +95,73 @@ impl App {
         }
         filter
     }
+    pub fn visible_issues(&self) -> Vec<&crate::issues::Issue> {
+        let Ok(filter) = crate::issues::IssueFilter::parse(&self.issue_query) else {
+            return vec![];
+        };
+        let mut issues: Vec<_> = self
+            .visible()
+            .into_iter()
+            .filter_map(|i| self.issues.get(&self.repositories[i].id))
+            .flatten()
+            .filter(|issue| filter.matches(issue))
+            .collect();
+        issues.sort_by(|a, b| {
+            b.updated_at
+                .cmp(&a.updated_at)
+                .then(a.repo_id.cmp(&b.repo_id))
+                .then(a.number.cmp(&b.number))
+        });
+        issues
+    }
+    pub fn current_issue(&self) -> Option<&crate::issues::Issue> {
+        self.visible_issues().get(self.selected).copied()
+    }
+    fn list_len(&self) -> usize {
+        match self.view {
+            View::Repositories => self.visible().len(),
+            View::Issues => self.visible_issues().len(),
+            View::Focuses => self.focuses.len(),
+        }
+    }
+    pub fn apply_issues(
+        &mut self,
+        account: u64,
+        repo_id: u64,
+        result: Result<Vec<crate::issues::Issue>>,
+    ) {
+        if self.account.as_ref().map(|a| a.id) != Some(account) {
+            return;
+        }
+        let selected_issue = if self.view == View::Issues {
+            self.current_issue()
+                .map(|issue| (issue.repo_id, issue.number))
+        } else {
+            None
+        };
+        match result {
+            Ok(issues) => {
+                self.issues.insert(repo_id, issues);
+                self.issue_status.insert(repo_id, "Complete".into());
+            }
+            Err(error) => {
+                self.issue_status.insert(
+                    repo_id,
+                    format!("Incomplete: {error}; previous results may be stale. r retries"),
+                );
+            }
+        }
+        self.selected = self.selected.min(self.list_len().saturating_sub(1));
+        if let Some(identity) = selected_issue {
+            if let Some(index) = self
+                .visible_issues()
+                .iter()
+                .position(|issue| (issue.repo_id, issue.number) == identity)
+            {
+                self.selected = index;
+            }
+        }
+    }
     pub fn visible(&self) -> Vec<usize> {
         let filter = self.filter();
         self.repositories
@@ -90,6 +180,10 @@ impl App {
     }
     pub fn identify(&mut self, account: Account) -> Result<()> {
         if self.account.as_ref().map(|a| a.id) != Some(account.id) {
+            self.issues.clear();
+            self.issue_status.clear();
+            self.focuses.clear();
+            self.view = View::Repositories;
             self.mode = Mode::Browse;
             self.input.clear();
             self.edit_target = None;
@@ -99,6 +193,7 @@ impl App {
         self.selected = 0;
         let id = account.id;
         self.account = Some(account);
+        self.focuses = self.store.focuses(id)?;
         self.repositories = self.store.repositories(id)?;
         self.load_tags()?;
         self.status = "Refreshing watched repositories (cached data may be stale)...".into();
@@ -117,6 +212,9 @@ impl App {
     }
     pub fn apply(&mut self, snapshot: Snapshot) -> Result<()> {
         if self.account.as_ref().map(|a| a.id) != Some(snapshot.account.id) {
+            self.issues.clear();
+            self.issue_status.clear();
+            self.focuses.clear();
             self.repositories.clear();
             self.tags.clear();
             self.account = None;
@@ -134,6 +232,9 @@ impl App {
                     .position(|i| self.repositories[*i].id == id)
             })
             .unwrap_or(0);
+        if self.view != View::Repositories {
+            self.selected = 0;
+        }
         self.status = format!(
             "{} watched repositories • {}",
             self.repositories.len(),
@@ -167,6 +268,25 @@ impl App {
                     if self.mode == Mode::Search {
                         self.query = self.input.trim().to_owned();
                         self.selected = 0;
+                    } else if self.mode == Mode::IssueSearch {
+                        crate::issues::IssueFilter::parse(&self.input)?;
+                        self.issue_query = self.input.trim().to_owned();
+                        self.selected = 0;
+                        self.detail_scroll = 0;
+                    } else if self.mode == Mode::SaveFocus {
+                        let account = self
+                            .account
+                            .as_ref()
+                            .ok_or_else(|| anyhow::anyhow!("Connect before saving a focus"))?;
+                        let focus = crate::focus::Focus {
+                            name: self.input.clone(),
+                            repository_query: self.query.clone(),
+                            issue_query: self.issue_query.clone(),
+                        };
+                        self.store.save_focus(account.id, &focus)?;
+                        self.focuses = self.store.focuses(account.id)?;
+                        self.status =
+                            format!("Focus saved: {}. f opens saved focuses", focus.name.trim());
                     } else if let Some((account_id, repo_id)) = self.edit_target {
                         anyhow::ensure!(
                             self.account.as_ref().map(|a| a.id) == Some(account_id),
@@ -196,18 +316,78 @@ impl App {
         }
         match key.code {
             KeyCode::Char('q') => return Ok(Action::Quit),
-            KeyCode::Char('r') => return Ok(Action::Refresh),
+            KeyCode::Char('r') => {
+                return Ok(if self.view == View::Issues {
+                    Action::FetchIssues
+                } else {
+                    Action::Refresh
+                })
+            }
+            KeyCode::Char('i') if self.view == View::Repositories => {
+                self.view = View::Issues;
+                self.selected = 0;
+                self.detail = false;
+                return Ok(Action::FetchIssues);
+            }
+            KeyCode::Char('b') => {
+                self.view = View::Repositories;
+                self.selected = 0;
+                self.detail = false;
+            }
+            KeyCode::Char('f') => {
+                self.view = View::Focuses;
+                self.selected = 0;
+                self.detail = false;
+            }
+            KeyCode::Char('s') if self.view != View::Focuses => {
+                self.mode = Mode::SaveFocus;
+                self.input.clear();
+            }
+            KeyCode::Enter if self.view == View::Focuses => {
+                if let Some(focus) = self.focuses.get(self.selected) {
+                    self.query = focus.repository_query.clone();
+                    self.issue_query = focus.issue_query.clone();
+                    self.view = View::Issues;
+                    self.selected = 0;
+                    self.detail = false;
+                    self.detail_scroll = 0;
+                    return Ok(Action::FetchIssues);
+                }
+            }
+            KeyCode::Char('o') if self.view == View::Issues => {
+                if let Some(issue) = self.current_issue() {
+                    anyhow::ensure!(
+                        crate::issues::valid_issue_url(&issue.url),
+                        "Issue URL is not a valid HTTPS github.com issue URL"
+                    );
+                    return Ok(Action::OpenIssue(issue.url.clone()));
+                }
+            }
+            KeyCode::PageDown => self.detail_scroll = self.detail_scroll.saturating_add(10),
+            KeyCode::PageUp => self.detail_scroll = self.detail_scroll.saturating_sub(10),
             KeyCode::Char('?') => self.help = true,
             KeyCode::Tab => self.detail = !self.detail,
             KeyCode::Down | KeyCode::Char('j') => {
-                self.selected = (self.selected + 1).min(self.visible().len().saturating_sub(1))
+                self.selected = (self.selected + 1).min(self.list_len().saturating_sub(1));
+                self.detail_scroll = 0;
             }
-            KeyCode::Up | KeyCode::Char('k') => self.selected = self.selected.saturating_sub(1),
-            KeyCode::Char('/') => {
-                self.input = self.query.clone();
-                self.mode = Mode::Search;
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.selected = self.selected.saturating_sub(1);
+                self.detail_scroll = 0;
             }
-            KeyCode::Char('t') => {
+            KeyCode::Char('/') if self.view != View::Focuses => {
+                self.input = if self.view == View::Issues {
+                    self.issue_query.clone()
+                } else {
+                    self.query.clone()
+                };
+                self.mode = if self.view == View::Issues {
+                    Mode::IssueSearch
+                } else {
+                    Mode::Search
+                };
+            }
+            KeyCode::Char('t') if self.view == View::Repositories => {
                 if let Some(repo) = self.current() {
                     let repo_id = repo.id;
                     self.edit_target = self.account.as_ref().map(|a| (a.id, repo_id));
@@ -220,7 +400,11 @@ impl App {
                 }
             }
             KeyCode::Esc => {
-                self.query.clear();
+                if self.view == View::Issues {
+                    self.issue_query.clear();
+                } else {
+                    self.query.clear();
+                }
                 self.selected = 0;
             }
             _ => {}
@@ -237,7 +421,7 @@ pub fn clean(text: &str) -> String {
         .collect()
 }
 
-fn query_words(query: &str) -> Vec<String> {
+pub(crate) fn query_words(query: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut word = String::new();
     let mut quoted = false;

@@ -119,3 +119,101 @@ fn quoted_tag_filter_matches_spaces() {
     app.query = "topic:rust tag:\"needs review\"".into();
     assert_eq!(app.visible(), vec![0]);
 }
+
+#[test]
+fn saved_focus_recomputes_membership_and_failed_fetch_preserves_results() {
+    use gh_wanted::app::View;
+    let mut app = app();
+    app.tags.insert(1, vec!["priority".into()]);
+    app.query = "topic:rust tag:priority".into();
+    assert!(matches!(
+        app.key(key(KeyCode::Char('i'))).unwrap(),
+        Action::FetchIssues
+    ));
+    app.key(key(KeyCode::Char('/'))).unwrap();
+    app.input = "label:\"good first issue\"".into();
+    app.key(key(KeyCode::Enter)).unwrap();
+    app.key(key(KeyCode::Char('s'))).unwrap();
+    app.input = "Rust starters".into();
+    app.key(key(KeyCode::Enter)).unwrap();
+    app.query.clear();
+    app.issue_query.clear();
+    app.key(key(KeyCode::Char('f'))).unwrap();
+    assert_eq!(app.view, View::Focuses);
+    assert!(matches!(
+        app.key(key(KeyCode::Enter)).unwrap(),
+        Action::FetchIssues
+    ));
+    assert_eq!(app.query, "topic:rust tag:priority");
+    assert_eq!(app.issue_query, "label:\"good first issue\"");
+    assert_eq!(app.visible(), vec![0]);
+    let issue = gh_wanted::issues::Issue {
+        repo_id: 1,
+        number: 1,
+        title: "Help keyboard users".into(),
+        body: None,
+        state: "open".into(),
+        created_at: "2026-09-10".into(),
+        updated_at: "2026-09-11".into(),
+        labels: vec!["good first issue".into()],
+        assignees: vec![],
+        url: "https://github.com/demo/rust/issues/1".into(),
+    };
+    app.apply_issues(1, 1, Ok(vec![issue.clone()]));
+    assert_eq!(app.visible_issues().len(), 1);
+    app.apply_issues(1, 1, Err(anyhow::anyhow!("Page 2 failed")));
+    assert_eq!(app.visible_issues(), vec![&issue]);
+    assert!(app.issue_status[&1].contains("Incomplete"));
+    app.apply_issues(2, 1, Ok(vec![]));
+    assert_eq!(app.visible_issues().len(), 1);
+    for (width, height) in [(100, 30), (50, 15), (20, 5)] {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|f| ui::draw(f, &app)).unwrap();
+        app.detail = true;
+        terminal.draw(|f| ui::draw(f, &app)).unwrap();
+        app.detail = false;
+    }
+    app.tags.insert(1, vec![]);
+    app.key(key(KeyCode::Char('f'))).unwrap();
+    app.key(key(KeyCode::Enter)).unwrap();
+    assert!(app.visible().is_empty());
+    assert!(app.visible_issues().is_empty());
+    app.identify(Account {
+        id: 2,
+        login: "other".into(),
+    })
+    .unwrap();
+    assert!(app.issues.is_empty());
+    assert!(app.focuses.is_empty());
+}
+
+#[test]
+fn issue_selection_survives_other_repository_finishing() {
+    let mut app = app();
+    app.view = gh_wanted::app::View::Issues;
+    app.repositories.push(Repository {
+        id: 2,
+        full_name: "demo/other".into(),
+        description: None,
+        topics: vec![],
+        archived: false,
+    });
+    let mut issue = gh_wanted::issues::Issue {
+        repo_id: 1,
+        number: 1,
+        title: "Selected".into(),
+        body: None,
+        state: "open".into(),
+        created_at: "2026-09-10".into(),
+        updated_at: "2026-09-10".into(),
+        labels: vec![],
+        assignees: vec![],
+        url: "https://github.com/demo/rust/issues/1".into(),
+    };
+    app.apply_issues(1, 1, Ok(vec![issue.clone()]));
+    issue.repo_id = 2;
+    issue.updated_at = "2026-09-11".into();
+    app.apply_issues(1, 2, Ok(vec![issue]));
+    assert_eq!(app.current_issue().unwrap().repo_id, 1);
+    assert_eq!(app.selected, 1);
+}

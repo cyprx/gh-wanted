@@ -42,14 +42,47 @@ impl Store {
                 );
                 PRAGMA user_version = 1;",
             )?,
-            1 => {}
+            1 | 2 => {}
             _ => bail!("Unsupported repository database schema version {version}"),
         }
         transaction
             .prepare("SELECT host, account, repo_id, repository_json FROM repositories LIMIT 0")?;
         transaction.prepare("SELECT host, account, repo_id, tag FROM local_tags LIMIT 0")?;
+        if version < 2 {
+            transaction.execute_batch(
+                "CREATE TABLE focuses (
+                host TEXT NOT NULL, account TEXT NOT NULL, name_key TEXT NOT NULL,
+                definition TEXT NOT NULL, PRIMARY KEY(host, account, name_key)
+            ); PRAGMA user_version = 2;",
+            )?;
+        }
+        transaction.prepare("SELECT host, account, name_key, definition FROM focuses LIMIT 0")?;
         transaction.commit()?;
         Ok(Self { connection })
+    }
+
+    pub fn save_focus(&mut self, account: u64, focus: &crate::focus::Focus) -> Result<()> {
+        focus.validate()?;
+        let mut focus = focus.clone();
+        focus.name = focus.name.trim().to_owned();
+        self.connection.execute(
+            "INSERT INTO focuses (host, account, name_key, definition) VALUES ('github.com', ?1, ?2, ?3)",
+            params![account.to_string(), focus.name.to_lowercase(), serde_json::to_string(&focus)?],
+        ).context("Could not save focus; use a unique name")?;
+        Ok(())
+    }
+
+    pub fn focuses(&self, account: u64) -> Result<Vec<crate::focus::Focus>> {
+        let mut statement = self.connection.prepare("SELECT definition FROM focuses WHERE host = 'github.com' AND account = ?1 ORDER BY name_key")?;
+        let rows = statement.query_map([account.to_string()], |row| row.get::<_, String>(0))?;
+        let mut focuses = Vec::new();
+        for row in rows {
+            let focus: crate::focus::Focus =
+                serde_json::from_str(&row?).context("Read saved focus")?;
+            focus.validate()?;
+            focuses.push(focus);
+        }
+        Ok(focuses)
     }
 
     pub fn repositories(&self, account: u64) -> Result<Vec<Repository>> {

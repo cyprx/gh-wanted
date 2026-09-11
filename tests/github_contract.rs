@@ -156,3 +156,37 @@ fn cancellation_stops_inflight_process() {
     assert!(started.elapsed() < Duration::from_secs(2));
     drop(dir);
 }
+
+#[test]
+fn issue_fetch_has_explicit_parameters_and_rejects_failed_pages() {
+    let script = r#"
+if [ "$4" = user ]; then
+  printf '%s' '{"id":7,"login":"alice"}'
+else
+  [ "$4" = 'repos/demo/repo/issues?state=all&sort=updated&direction=desc&per_page=100' ] && [ "$5" = --paginate ] && [ "$6" = --slurp ] && [ "$#" = 6 ] || exit 5
+  printf '%s' '[[]]'
+fi
+"#;
+    let repo = gh_wanted::repositories::Repository {
+        id: 1,
+        full_name: "demo/repo".into(),
+        description: None,
+        topics: vec![],
+        archived: false,
+    };
+    let account = gh_wanted::github::Account {
+        id: 7,
+        login: "alice".into(),
+    };
+    let (_dir, client) = fake(script, Duration::from_secs(2));
+    assert!(client.issues(&account, &repo).unwrap().is_empty());
+    let failed = script.replace("printf '%s' '[[]]'", "printf '%s' '[[]'; exit 1");
+    let (_dir, client) = fake(&failed, Duration::from_secs(2));
+    assert!(client.issues(&account, &repo).is_err());
+    let (_dir, client) = fake(script, Duration::from_secs(2));
+    let wrong = gh_wanted::github::Account {
+        id: 8,
+        login: "bob".into(),
+    };
+    assert!(client.issues(&wrong, &repo).is_err());
+}

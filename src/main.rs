@@ -21,6 +21,75 @@ use std::{
 enum Update {
     Account(Account),
     Done(Result<Snapshot>),
+    Issues(u64, u64, Result<Vec<gh_wanted::issues::Issue>>),
+    IssuesDone,
+}
+
+fn start_issues(
+    sender: SyncSender<Update>,
+    cancellation: Arc<AtomicBool>,
+    account: Account,
+    repos: Vec<Repository>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let client = GhClient::default().with_cancellation(cancellation.clone());
+        for repo in repos {
+            if cancellation.load(Ordering::Relaxed) {
+                break;
+            }
+            let result = client.issues(&account, &repo);
+            if sender
+                .send(Update::Issues(account.id, repo.id, result))
+                .is_err()
+            {
+                return;
+            }
+        }
+        let _ = sender.send(Update::IssuesDone);
+    })
+}
+
+fn demo_issues(app: &mut App, repos: &[Repository]) {
+    for repo in repos {
+        app.apply_issues(1, repo.id, Ok(vec![gh_wanted::issues::Issue {
+            repo_id: repo.id, number: 1, title: "Improve keyboard navigation".into(),
+            body: Some("Help new contributors navigate the list with the keyboard.\n\nAdd a regression test for moving through an empty list, and document the shortcuts.".into()),
+            state: "open".into(), created_at: "2026-09-10T09:00:00Z".into(), updated_at: "2026-09-11T09:00:00Z".into(),
+            labels: vec!["good first issue".into(), "enhancement".into()], assignees: vec![],
+            url: format!("https://github.com/{}/issues/1", repo.full_name),
+        }]));
+    }
+}
+
+fn open_issue(url: &str) -> Result<()> {
+    anyhow::ensure!(gh_wanted::issues::valid_issue_url(url), "Invalid issue URL");
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut c = std::process::Command::new("open");
+        c.arg(url);
+        c
+    };
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut c = std::process::Command::new("rundll32.exe");
+        c.args(["url.dll,FileProtocolHandler", url]);
+        c
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let mut command = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(url);
+        c
+    };
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut child = command.spawn().context("Could not launch browser")?;
+    thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
 }
 
 fn start_sync(sender: SyncSender<Update>, cancellation: Arc<AtomicBool>) -> thread::JoinHandle<()> {
@@ -80,6 +149,15 @@ fn demo(app: &mut App) -> Result<()> {
 fn updates(app: &mut App, receiver: &Receiver<Update>) {
     while let Ok(update) = receiver.try_recv() {
         let result = match update {
+            Update::Issues(account, repo, result) => {
+                app.apply_issues(account, repo, result);
+                Ok(())
+            }
+            Update::IssuesDone => {
+                app.busy = false;
+                app.status = "Issue refresh finished. Repository completion is shown above. r retries; s saves focus".into();
+                Ok(())
+            }
             Update::Account(account) => app.identify(account),
             Update::Done(result) => {
                 app.busy = false;
@@ -133,6 +211,50 @@ fn run() -> Result<()> {
                         continue;
                     }
                     match app.key(key) {
+                        Ok(Action::OpenIssue(url)) => {
+                            if is_demo {
+                                app.status =
+                                    "Demo issues are fictional; browser opening is disabled".into();
+                            } else if let Err(error) = open_issue(&url) {
+                                app.status = error.to_string();
+                            } else {
+                                app.status = "Opening issue in browser".into();
+                            }
+                        }
+                        Ok(Action::FetchIssues) if !app.busy => {
+                            if let Some(account) = app.account.clone() {
+                                let repos: Vec<_> = app
+                                    .visible()
+                                    .into_iter()
+                                    .map(|i| app.repositories[i].clone())
+                                    .collect();
+                                for repo in &repos {
+                                    app.issue_status.insert(
+                                        repo.id,
+                                        "Loading; previous results may be stale".into(),
+                                    );
+                                }
+                                if is_demo {
+                                    demo_issues(&mut app, &repos);
+                                } else if !repos.is_empty() {
+                                    app.busy = true;
+                                    app.status = "Loading all issue pages; results remain incomplete until each repository finishes".into();
+                                    worker = Some(start_issues(
+                                        sender.clone(),
+                                        cancellation.clone(),
+                                        account,
+                                        repos,
+                                    ));
+                                }
+                            } else {
+                                app.status = "Connect first: b returns to repositories, r retries connection".into();
+                            }
+                        }
+                        Ok(Action::FetchIssues) => {
+                            app.status =
+                                "Another refresh is running. Press r in Issues when it finishes"
+                                    .into()
+                        }
                         Ok(Action::Quit) => break,
                         Ok(Action::Refresh) if !app.busy => {
                             if is_demo {
@@ -143,7 +265,7 @@ fn run() -> Result<()> {
                                 worker = Some(start_sync(sender.clone(), cancellation.clone()));
                             }
                         }
-                        Err(error) => app.status = format!("Could not save: {error}"),
+                        Err(error) => app.status = format!("Action failed: {error}"),
                         _ => {}
                     }
                 }
