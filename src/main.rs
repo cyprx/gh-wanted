@@ -30,34 +30,57 @@ enum Update {
     ActivityDone,
 }
 
+fn metrics_path() -> Result<std::path::PathBuf> {
+    let dirs =
+        ProjectDirs::from("", "", "gh-wanted").context("Cannot determine local data directory")?;
+    Ok(dirs.data_local_dir().join("refresh-metrics.jsonl"))
+}
+
+fn refresh_client(cancellation: Arc<AtomicBool>, kind: &str) -> GhClient {
+    let client = GhClient::default().with_cancellation(cancellation);
+    match metrics_path() {
+        Ok(path) => client.with_metrics(path, kind),
+        Err(_) => client,
+    }
+}
+
+fn binding_failure(error: &anyhow::Error) -> anyhow::Error {
+    match error.downcast_ref::<gh_wanted::sync::RequestFailure>() {
+        Some(policy) => policy.clone().into(),
+        None => anyhow::anyhow!("Could not bind refresh credentials: {error}"),
+    }
+}
+
 fn start_activity(
     sender: SyncSender<Update>,
     cancellation: Arc<AtomicBool>,
     requests: Vec<gh_wanted::sync::FeedRequest>,
+    trigger: &'static str,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
-        let client = GhClient::default().with_cancellation(cancellation.clone());
-        let mut stop: Option<(bool, Option<i64>)> = None;
-        for request in requests {
-            if cancellation.load(Ordering::Relaxed) {
-                break;
-            }
-            let result = if let Some((paused, retry_at)) = stop {
-                Err(gh_wanted::sync::RequestFailure { paused, retry_at }.into())
-            } else {
-                client.activity(&request)
-            };
-            if let Err(error) = &result {
-                if let Some(policy) = error.downcast_ref::<gh_wanted::sync::RequestFailure>() {
-                    if policy.paused || policy.retry_at.is_some() {
-                        stop = Some((policy.paused, policy.retry_at));
+        let client = refresh_client(cancellation.clone(), "activity");
+        client.record_refresh_plan(
+            trigger,
+            requests.first().map(|r| r.account.id),
+            requests.len(),
+        );
+        let expected = requests.first().map(|r| &r.account);
+        let client = client.bind(expected);
+        gh_wanted::sync::run_bounded(
+            requests,
+            &cancellation,
+            |request| match &client {
+                Ok(client) => {
+                    if let Err(error) = client.check_refresh() {
+                        client.record_skipped_feed(request.repo.id, &request.state.feed);
+                        return Err(error);
                     }
+                    client.activity(request)
                 }
-            }
-            if sender.send(Update::Activity(request, result)).is_err() {
-                return;
-            }
-        }
+                Err(error) => Err(binding_failure(error)),
+            },
+            |request, result| sender.send(Update::Activity(request, result)).is_ok(),
+        );
         let _ = sender.send(Update::ActivityDone);
     })
 }
@@ -119,31 +142,28 @@ fn start_issues(
     repos: Vec<Repository>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
-        let client = GhClient::default().with_cancellation(cancellation.clone());
-        let mut stop: Option<(bool, Option<i64>)> = None;
-        for repo in repos {
-            if cancellation.load(Ordering::Relaxed) {
-                break;
-            }
-            let result = if let Some((paused, retry_at)) = stop {
-                Err(gh_wanted::sync::RequestFailure { paused, retry_at }.into())
-            } else {
-                client.issues(&account, &repo)
-            };
-            if let Err(error) = &result {
-                if let Some(policy) = error.downcast_ref::<gh_wanted::sync::RequestFailure>() {
-                    if policy.paused || policy.retry_at.is_some() {
-                        stop = Some((policy.paused, policy.retry_at));
+        let client = refresh_client(cancellation.clone(), "issues");
+        client.record_refresh_plan("manual", Some(account.id), repos.len());
+        let client = client.bind(Some(&account));
+        gh_wanted::sync::run_bounded(
+            repos,
+            &cancellation,
+            |repo| match &client {
+                Ok(client) => {
+                    if let Err(error) = client.check_refresh() {
+                        client.record_skipped_feed(repo.id, "issues");
+                        return Err(error);
                     }
+                    client.issues(&account, repo)
                 }
-            }
-            if sender
-                .send(Update::Issues(account.id, repo.id, result))
-                .is_err()
-            {
-                return;
-            }
-        }
+                Err(error) => Err(binding_failure(error)),
+            },
+            |repo, result| {
+                sender
+                    .send(Update::Issues(account.id, repo.id, result))
+                    .is_ok()
+            },
+        );
         let _ = sender.send(Update::IssuesDone);
     })
 }
@@ -199,8 +219,9 @@ fn open_url(url: &str) -> Result<()> {
 
 fn start_sync(sender: SyncSender<Update>, cancellation: Arc<AtomicBool>) -> thread::JoinHandle<()> {
     thread::spawn(move || {
-        let client = GhClient::default().with_cancellation(cancellation);
+        let client = refresh_client(cancellation, "repositories");
         let result = (|| {
+            let client = client.bind(None)?;
             let account = client.account()?;
             sender
                 .send(Update::Account(account.clone()))
@@ -291,8 +312,14 @@ fn updates(app: &mut App, receiver: &Receiver<Update>) {
 
 fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args == ["--refresh-metrics"] {
+        let path = metrics_path()?;
+        eprintln!("Refresh metrics: {}", path.display());
+        println!("{}", gh_wanted::metrics::report(&path)?);
+        return Ok(());
+    }
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("gh-wanted [--demo]\n\nWatch GitHub repositories and organize local tags.\nAuthenticate with gh auth login before normal use.\n--demo uses fictional repositories and temporary in-memory storage.");
+        println!("gh-wanted [--demo | --refresh-metrics]\n\nWatch GitHub repositories and organize local tags.\nAuthenticate with gh auth login before normal use.\n--demo uses fictional repositories and temporary in-memory storage.\n--refresh-metrics summarizes local refresh measurements and prints their file path.");
         return Ok(());
     }
     anyhow::ensure!(
@@ -333,6 +360,7 @@ fn run() -> Result<()> {
                             sender.clone(),
                             cancellation.clone(),
                             requests,
+                            "automatic",
                         ))
                     }
                     Err(error) => {
@@ -374,6 +402,7 @@ fn run() -> Result<()> {
                                         sender.clone(),
                                         cancellation.clone(),
                                         requests,
+                                        "manual",
                                     ))
                                 }
                                 Ok(_) => app.status =
@@ -405,11 +434,12 @@ fn run() -> Result<()> {
                         }
                         Ok(Action::FetchIssues) if !app.busy => {
                             if let Some(account) = app.account.clone() {
-                                let repos: Vec<_> = app
+                                let mut repos: Vec<_> = app
                                     .visible()
                                     .into_iter()
                                     .map(|i| app.repositories[i].clone())
                                     .collect();
+                                repos.sort_by_key(|repo| app.refresh_priority(repo.id));
                                 for repo in &repos {
                                     app.issue_status.insert(
                                         repo.id,

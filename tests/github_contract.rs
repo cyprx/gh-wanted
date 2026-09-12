@@ -48,6 +48,24 @@ fn empty_subscriptions_are_valid() {
 }
 
 #[test]
+fn refresh_metrics_capture_pagination_account_overhead_and_safe_results() {
+    let (dir, client) = fake(&response("[[],[]]"), Duration::from_secs(2));
+    let path = dir.path().join("metrics.jsonl");
+    let client = client.with_metrics(path.clone(), "repositories");
+    client.sync().unwrap();
+    drop(client);
+    let raw = fs::read_to_string(&path).unwrap();
+    assert!(!raw.contains("alice"));
+    let summary: Vec<serde_json::Value> =
+        serde_json::from_str(&gh_wanted::metrics::report(&path).unwrap()).unwrap();
+    assert_eq!(summary[0]["cli_calls"], 3);
+    assert_eq!(summary[0]["account_calls"], 2);
+    assert_eq!(summary[0]["observed_pages"], 4);
+    assert_eq!(summary[0]["items_returned"], 0);
+    assert!(summary[0].get("first_nonempty_result_ms").is_none());
+}
+
+#[test]
 fn account_can_be_checked_without_reading_subscriptions() {
     let (_dir, client) = fake(&response("invalid-unused-data"), Duration::from_secs(2));
     assert_eq!(client.account().unwrap().id, 7);

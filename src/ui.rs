@@ -102,9 +102,9 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     );
     let mut tabs = Vec::new();
     for (view, key, label) in [
-        (View::Repositories, "b", "Repos"),
-        (View::Issues, "i", "Issues"),
         (View::Activity, "d", "Today"),
+        (View::Issues, "i", "Issues"),
+        (View::Repositories, "b", "Repos"),
         (View::Focuses, "f", "Focuses"),
     ] {
         let active = app.view == view;
@@ -663,7 +663,9 @@ fn draw_activity(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 Span::styled(
                     format!(
                         "{complete}/{expected} feeds{}",
-                        if incomplete {
+                        if app.busy {
+                            " • checking"
+                        } else if incomplete {
                             " • INCOMPLETE"
                         } else {
                             " checked"
@@ -723,8 +725,22 @@ fn draw_activity(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     if !app.detail {
         let block = panel(" Activity inbox ", false);
         if events.is_empty() {
-            let message = if ids.is_empty() {
+            let message = if app.account.is_none() {
+                if app.busy {
+                    "Connecting to GitHub. Your cached activity will appear after account verification."
+                } else {
+                    "Not connected. Press b, then r to connect; check the status below for details."
+                }
+            } else if app.repositories.is_empty() {
+                if app.busy {
+                    "Checking your watched repositories..."
+                } else {
+                    "No watched repositories yet. Watch a repository on GitHub, then press b and r to refresh your list."
+                }
+            } else if ids.is_empty() {
                 "No repositories match. Press b to change repository filters."
+            } else if app.busy {
+                "Still checking for updates. Cached activity remains available while refresh runs."
             } else if incomplete {
                 "Activity is incomplete. Press r to fetch or retry; e shows feed errors. Cached unread activity is retained."
             } else {

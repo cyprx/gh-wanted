@@ -86,7 +86,7 @@ impl App {
             network_retry_at: None,
             unread_only: false,
             feed_details: false,
-            view: View::Repositories,
+            view: View::Activity,
             pane: Pane::List,
             issues: HashMap::new(),
             issue_status: HashMap::new(),
@@ -209,6 +209,22 @@ impl App {
             .get(self.selected)
             .and_then(|i| self.repositories.get(*i))
     }
+
+    /// Activity is persisted already; issue results provide an additional in-session hint.
+    /// Stable sorting preserves order for repositories without evidence of activity.
+    pub fn refresh_priority(&self, repo: u64) -> std::cmp::Reverse<(bool, i64)> {
+        let latest = self
+            .activities
+            .iter()
+            .filter(|a| a.repo_id == repo)
+            .map(|a| a.occurred_at)
+            .max();
+        let has_issues = self
+            .issues
+            .get(&repo)
+            .is_some_and(|issues| !issues.is_empty());
+        std::cmp::Reverse((latest.is_some() || has_issues, latest.unwrap_or(0)))
+    }
     pub fn identify(&mut self, account: Account) -> Result<()> {
         if self.account.as_ref().map(|a| a.id) != Some(account.id) {
             self.activities.clear();
@@ -219,7 +235,6 @@ impl App {
             self.issues.clear();
             self.issue_status.clear();
             self.focuses.clear();
-            self.view = View::Repositories;
             self.mode = Mode::Browse;
             self.input.clear();
             self.edit_target = None;
@@ -700,6 +715,7 @@ impl App {
                 }
             }
         }
+        requests.sort_by_key(|request| self.refresh_priority(request.repo.id));
         self.load_activity()?;
         self.next_refresh = self.now.saturating_add(crate::sync::REFRESH_SECONDS);
         self.auto_paused = false;

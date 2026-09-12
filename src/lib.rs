@@ -3,6 +3,7 @@ pub mod app;
 pub mod focus;
 pub mod github;
 pub mod issues;
+pub mod metrics;
 pub mod repositories;
 pub mod store;
 pub mod sync;

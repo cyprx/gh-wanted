@@ -78,13 +78,27 @@ if [ "$4" = user ]; then printf '%s' '{"id":1,"login":"demo"}'; exit 0; fi
 printf 'HTTP/2.0 429 Too Many Requests\r\nRetry-After: 7200\r\n\r\n{}'
 exit 1
 "#;
-    let (_dir, client) = fake(script);
+    let (dir, client) = fake(script);
+    let path = dir.path().join("metrics.jsonl");
+    let client = client.with_metrics(path.clone(), "activity");
     let now = chrono::Utc::now().timestamp();
     let error = client.activity(&request("comments")).unwrap_err();
     let failure = error
         .downcast_ref::<gh_wanted::sync::RequestFailure>()
         .unwrap();
     assert!(failure.retry_at.unwrap() >= now + 7200);
+    drop(client);
+    let records: Vec<serde_json::Value> = fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .map(|s| serde_json::from_str(s).unwrap())
+        .collect();
+    assert!(records.iter().any(|v| v["event"] == "http_failure"
+        && v["http_status"] == 429
+        && v["retry_after_seconds"] == 7200));
+    assert!(records.iter().any(|v| v["event"] == "request_finished"
+        && v["outcome"] == "rate_limited"
+        && v["pages"].is_null()));
     let changed = r#"
 if [ "$4" = user ]; then
   if [ -f "$0.count" ]; then printf '%s' '{"id":2,"login":"other"}'; else touch "$0.count"; printf '%s' '{"id":1,"login":"demo"}'; fi
@@ -99,4 +113,39 @@ else printf 'HTTP/2.0 200 OK\r\n\r\n[]'; fi
             .unwrap()
             .paused
     );
+}
+
+#[test]
+fn concurrent_rate_failure_stops_other_feeds_before_their_next_page() {
+    let script = r#"
+if [ "$1" = auth ]; then printf '%s' synthetic-test-credential; exit 0; fi
+if [ "$4" = user ]; then printf '%s' '{"id":1,"login":"demo"}'; exit 0; fi
+case "$4" in
+  *issues/comments*) printf 'HTTP/2.0 429 Too Many Requests\r\nRetry-After: 60\r\n\r\n{}'; exit 1 ;;
+  *page=1) sleep 0.2; printf 'HTTP/2.0 200 OK\r\nLink: <unused>; rel="next"\r\n\r\n[]' ;;
+  *) echo unexpected-page >> "$0.pages"; printf 'HTTP/2.0 200 OK\r\n\r\n[]' ;;
+esac
+"#;
+    let (dir, client) = fake(script);
+    let client = client.bind(Some(&request("issues").account)).unwrap();
+    let results = std::sync::Mutex::new(Vec::new());
+    gh_wanted::sync::run_bounded(
+        vec![request("issues"), request("comments")],
+        &std::sync::atomic::AtomicBool::new(false),
+        |r| client.activity(r),
+        |_, result| {
+            results.lock().unwrap().push(result);
+            true
+        },
+    );
+    let results = results.into_inner().unwrap();
+    assert_eq!(results.len(), 2);
+    assert!(results.iter().all(|r| r
+        .as_ref()
+        .unwrap_err()
+        .downcast_ref::<gh_wanted::sync::RequestFailure>()
+        .unwrap()
+        .retry_at
+        .is_some()));
+    assert!(!dir.path().join("gh.pages").exists());
 }

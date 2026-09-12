@@ -95,7 +95,10 @@ def capture(name):
             json.dump({"screen": screen, "styles": styles}, output)
 
 try:
-    assert b"DEMO" in read_for(1)
+    landing = read_for(1)
+    assert b"DEMO" in landing and b"Activity inbox" in landing
+    assert landing.index(b"d Today") < landing.index(b"i Issues") < landing.index(b"b Repos")
+    send("b")
     capture("repositories")
     send("t")
     send("priority\r")

@@ -94,7 +94,71 @@ fn app() -> App {
         }],
     })
     .unwrap();
+    app.key(key(KeyCode::Char('b'))).unwrap();
     app
+}
+
+#[test]
+fn today_is_default_and_account_loading_preserves_chosen_view() {
+    use gh_wanted::app::View;
+    let mut app = App::new(Store::memory().unwrap(), true);
+    assert_eq!(app.view, View::Activity);
+    app.identify(Account {
+        id: 1,
+        login: "demo".into(),
+    })
+    .unwrap();
+    assert_eq!(app.view, View::Activity);
+    app.key(key(KeyCode::Char('b'))).unwrap();
+    app.identify(Account {
+        id: 2,
+        login: "other".into(),
+    })
+    .unwrap();
+    assert_eq!(app.view, View::Repositories);
+    assert_eq!(
+        App::new(Store::memory().unwrap(), true).view,
+        View::Activity
+    );
+}
+
+#[test]
+fn today_landing_distinguishes_connection_empty_loading_and_failure() {
+    fn screen(app: &App) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
+        terminal.draw(|frame| ui::draw(frame, app)).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>()
+    }
+    let mut app = App::new(Store::memory().unwrap(), true);
+    app.busy = true;
+    assert!(screen(&app).contains("Connecting to GitHub"));
+    app.identify(Account {
+        id: 1,
+        login: "demo".into(),
+    })
+    .unwrap();
+    app.busy = false;
+    let empty = screen(&app);
+    assert!(empty.contains("No watched repositories yet"));
+    assert!(empty.find("d Today").unwrap() < empty.find("i Issues").unwrap());
+    assert!(empty.find("i Issues").unwrap() < empty.find("b Repos").unwrap());
+    app.repositories.push(Repository {
+        id: 1,
+        full_name: "demo/repo".into(),
+        description: None,
+        topics: vec![],
+        archived: false,
+    });
+    app.busy = true;
+    assert!(screen(&app).contains("Still checking for updates"));
+    app.busy = false;
+    assert!(screen(&app).contains("Activity is incomplete"));
 }
 #[test]
 fn editing_tags_and_combining_filter() {
@@ -183,6 +247,39 @@ fn quoted_tag_filter_matches_spaces() {
     app.tags.insert(1, vec!["needs review".into()]);
     app.query = "topic:rust tag:\"needs review\"".into();
     assert_eq!(app.visible(), vec![0]);
+}
+
+#[test]
+fn refresh_priority_prefers_known_activity_without_dropping_quiet_repos() {
+    let mut app = app();
+    app.repositories.push(Repository {
+        id: 2,
+        full_name: "demo/active".into(),
+        description: None,
+        topics: vec![],
+        archived: false,
+    });
+    app.issues.insert(
+        2,
+        vec![gh_wanted::issues::Issue {
+            repo_id: 2,
+            number: 1,
+            title: "Known issue".into(),
+            body: None,
+            state: "open".into(),
+            created_at: "2026-09-11".into(),
+            updated_at: "2026-09-11".into(),
+            labels: vec![],
+            assignees: vec![],
+            url: "https://github.com/demo/active/issues/1".into(),
+        }],
+    );
+    let jobs = app.prepare_activity(true, None).unwrap();
+    assert_eq!(jobs.len(), 4);
+    assert_eq!(
+        jobs.iter().map(|r| r.repo.id).collect::<Vec<_>>(),
+        vec![2, 2, 1, 1]
+    );
 }
 
 #[test]

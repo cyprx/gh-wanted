@@ -4,6 +4,42 @@ pub const REFRESH_SECONDS: i64 = 15 * 60;
 pub const OVERLAP_SECONDS: i64 = 60;
 pub const INITIAL_HISTORY_SECONDS: i64 = 24 * 60 * 60;
 
+pub const REFRESH_WORKERS: usize = 3;
+
+/// A bounded queue; completed jobs are delivered immediately, not in input order.
+/// The caller keeps persistence on its UI thread and gates requests on shared failures.
+pub fn run_bounded<T: Send, R: Send>(
+    jobs: Vec<T>,
+    cancellation: &std::sync::atomic::AtomicBool,
+    work: impl Fn(&T) -> anyhow::Result<R> + Sync,
+    emit: impl Fn(T, anyhow::Result<R>) -> bool + Sync,
+) {
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    };
+    let queue = Mutex::new(std::collections::VecDeque::from(jobs));
+    let closed = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        for _ in 0..REFRESH_WORKERS {
+            let (queue, closed, work, emit) = (&queue, &closed, &work, &emit);
+            scope.spawn(move || loop {
+                if cancellation.load(Ordering::Relaxed) || closed.load(Ordering::Relaxed) {
+                    break;
+                }
+                let Some(job) = queue.lock().expect("refresh queue").pop_front() else {
+                    break;
+                };
+                let result = work(&job);
+                if !emit(job, result) {
+                    closed.store(true, Ordering::Relaxed);
+                    break;
+                }
+            });
+        }
+    });
+}
+
 #[derive(Clone, Debug)]
 pub struct FeedState {
     pub repo_id: u64,
@@ -38,7 +74,7 @@ pub struct FeedRequest {
     pub upper: i64,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct RequestFailure {
     pub paused: bool,
     pub retry_at: Option<i64>,

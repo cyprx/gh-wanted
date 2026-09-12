@@ -112,9 +112,19 @@ Persistent data uses the platform local-data directory from the `directories` cr
 
 Tags follow stable repository IDs across renames and remain stored when a repository is no longer watched. Each GitHub account has separate cached repositories and tags. The app verifies the active account before loading its cache, so an offline startup cannot load a cached account automatically. Once connected, refresh errors retain cached data with a stale-data message.
 
-Refresh runs in the background, with one sync at a time. Each `gh` call has a 30-second timeout and a 16 MiB combined output limit. Errors preserve stored data; corrupt or newer database schemas are reported instead of reset. Press `r` to retry authentication or connectivity failures; rate-limit deadlines also apply to manual retries.
+Refresh runs in the background, with one refresh at a time and up to three feed workers. Each refresh captures a credential in memory and verifies its GitHub account once. Switching the active CLI account affects the next refresh; in-flight results remain attached to the verified account. Previously active repositories are fetched first using persisted activity and in-session issue results. Each `gh` call has a 30-second timeout and a 16 MiB combined output limit. Errors preserve stored data; corrupt or newer database schemas are reported instead of reset. Press `r` to retry authentication or connectivity failures; rate-limit deadlines also apply to manual retries.
 
 ## Development checks
+
+The app opens on Today with cached activity after account verification. Tabs are
+ordered Today, Issues, Repos, Focuses; existing `d`, `i`, `b`, and `f` shortcuts
+are unchanged. Background account loading preserves the tab you have selected.
+
+Normal refreshes save bounded local timing and request diagnostics beside the
+database. Run `cargo run -- --refresh-metrics` to print the log path and retained
+run summaries. Demo mode produces no measurements. See
+[refresh monitoring](docs/refresh-monitoring.md) for recorded fields, retention,
+and measurement limits.
 
 ```sh
 nix develop path:. -c cargo fmt --check
