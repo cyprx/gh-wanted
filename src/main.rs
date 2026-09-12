@@ -160,9 +160,12 @@ fn demo_issues(app: &mut App, repos: &[Repository]) {
     }
 }
 
-fn open_issue(url: &str) -> Result<()> {
+fn open_url(url: &str) -> Result<()> {
     anyhow::ensure!(
-        gh_wanted::activity::valid_activity_url(url),
+        gh_wanted::activity::valid_activity_url(url)
+            || url
+                .strip_prefix("https://github.com/")
+                .is_some_and(gh_wanted::issues::valid_repo_name),
         "Invalid GitHub URL"
     );
     #[cfg(target_os = "macos")]
@@ -383,10 +386,21 @@ fn run() -> Result<()> {
                             if is_demo {
                                 app.status =
                                     "Demo issues are fictional; browser opening is disabled".into();
-                            } else if let Err(error) = open_issue(&url) {
+                            } else if let Err(error) = open_url(&url) {
                                 app.status = error.to_string();
                             } else {
                                 app.status = "Opening issue in browser".into();
+                            }
+                        }
+                        Ok(Action::OpenRepository(url)) => {
+                            if is_demo {
+                                app.status =
+                                    "Demo repository are fictional; browser opening is disabled"
+                                        .into();
+                            } else if let Err(error) = open_url(&url) {
+                                app.status = error.to_string();
+                            } else {
+                                app.status = "Opening repository in browser".into();
                             }
                         }
                         Ok(Action::FetchIssues) if !app.busy => {

@@ -24,6 +24,12 @@ pub enum View {
     Activity,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pane {
+    List,
+    Details,
+}
+
 pub struct App {
     pub activities: Vec<crate::activity::Activity>,
     pub feeds: Vec<crate::sync::FeedState>,
@@ -35,6 +41,7 @@ pub struct App {
     pub unread_only: bool,
     pub feed_details: bool,
     pub view: View,
+    pub pane: Pane,
     pub issues: HashMap<u64, Vec<crate::issues::Issue>>,
     pub issue_status: HashMap<u64, String>,
     pub issue_query: String,
@@ -62,6 +69,7 @@ pub enum Action {
     Refresh,
     FetchIssues,
     OpenIssue(String),
+    OpenRepository(String),
     FetchActivity,
     FetchReviews(u64, u64),
 }
@@ -79,6 +87,7 @@ impl App {
             unread_only: false,
             feed_details: false,
             view: View::Repositories,
+            pane: Pane::List,
             issues: HashMap::new(),
             issue_status: HashMap::new(),
             issue_query: String::new(),
@@ -281,79 +290,224 @@ impl App {
             return Ok(Action::Quit);
         }
         if self.mode != Mode::Browse {
-            match key.code {
-                KeyCode::Esc => {
-                    self.mode = Mode::Browse;
-                    self.input.clear();
-                }
-                KeyCode::Backspace => {
-                    self.input.pop();
-                }
-                KeyCode::Char(c) if !c.is_control() => {
-                    if self.input.len() < 2048 {
-                        self.input.push(c);
-                    }
-                }
-                KeyCode::Enter => {
-                    if self.mode == Mode::Search {
-                        self.query = self.input.trim().to_owned();
-                        self.selected = 0;
-                    } else if self.mode == Mode::IssueSearch {
-                        crate::issues::IssueFilter::parse(&self.input)?;
-                        self.issue_query = self.input.trim().to_owned();
-                        self.selected = 0;
-                        self.detail_scroll = 0;
-                    } else if self.mode == Mode::SaveFocus {
-                        let account = self
-                            .account
-                            .as_ref()
-                            .ok_or_else(|| anyhow::anyhow!("Connect before saving a focus"))?;
-                        let focus = crate::focus::Focus {
-                            name: self.input.clone(),
-                            repository_query: self.query.clone(),
-                            issue_query: self.issue_query.clone(),
-                        };
-                        self.store.save_focus(account.id, &focus)?;
-                        self.focuses = self.store.focuses(account.id)?;
-                        self.status =
-                            format!("Focus saved: {}. f opens saved focuses", focus.name.trim());
-                    } else if let Some((account_id, repo_id)) = self.edit_target {
-                        anyhow::ensure!(
-                            self.account.as_ref().map(|a| a.id) == Some(account_id),
-                            "Account changed; reopen tag editor"
-                        );
-                        let tags: Vec<String> = if self.input.trim().is_empty() {
-                            vec![]
-                        } else {
-                            self.input.split(',').map(str::to_owned).collect()
-                        };
-                        self.store.replace_tags(account_id, repo_id, &tags)?;
-                        let saved = self.store.tags(account_id, repo_id)?;
-                        self.tags.insert(repo_id, saved);
-                        self.selected = self.selected.min(self.visible().len().saturating_sub(1));
-                        self.status = "Local tags saved".into();
-                    }
-                    self.mode = Mode::Browse;
-                    self.input.clear();
-                }
-                _ => {}
-            }
-            return Ok(Action::None);
+            return self.handle_editor_key(key.code);
         }
         if self.help {
             self.help = false;
             return Ok(Action::None);
         }
-        match key.code {
-            KeyCode::Char('q') => return Ok(Action::Quit),
+        if let Some(action) = self.handle_global_key(key.code) {
+            return Ok(action);
+        }
+        match self.view {
+            View::Repositories => self.handle_repo_key(key.code),
+            View::Issues => self.handle_issue_key(key.code),
+            View::Focuses => self.handle_focus_key(key.code),
+            View::Activity => self.handle_activity_key(key.code),
+        }
+    }
+
+    fn handle_editor_key(&mut self, code: KeyCode) -> Result<Action> {
+        match code {
+            KeyCode::Esc => {
+                self.mode = Mode::Browse;
+                self.input.clear();
+            }
+            KeyCode::Backspace => {
+                self.input.pop();
+            }
+            KeyCode::Char(c) if !c.is_control() => {
+                if self.input.len() < 2048 {
+                    self.input.push(c);
+                }
+            }
+            KeyCode::Enter => {
+                if self.mode == Mode::Search {
+                    self.query = self.input.trim().to_owned();
+                    self.selected = 0;
+                } else if self.mode == Mode::IssueSearch {
+                    crate::issues::IssueFilter::parse(&self.input)?;
+                    self.issue_query = self.input.trim().to_owned();
+                    self.selected = 0;
+                    self.detail_scroll = 0;
+                } else if self.mode == Mode::SaveFocus {
+                    let account = self
+                        .account
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("Connect before saving a focus"))?;
+                    let focus = crate::focus::Focus {
+                        name: self.input.clone(),
+                        repository_query: self.query.clone(),
+                        issue_query: self.issue_query.clone(),
+                    };
+                    self.store.save_focus(account.id, &focus)?;
+                    self.focuses = self.store.focuses(account.id)?;
+                    self.status =
+                        format!("Focus saved: {}. f opens saved focuses", focus.name.trim());
+                } else if let Some((account_id, repo_id)) = self.edit_target {
+                    anyhow::ensure!(
+                        self.account.as_ref().map(|a| a.id) == Some(account_id),
+                        "Account changed; reopen tag editor"
+                    );
+                    let tags: Vec<String> = if self.input.trim().is_empty() {
+                        vec![]
+                    } else {
+                        self.input.split(',').map(str::to_owned).collect()
+                    };
+                    self.store.replace_tags(account_id, repo_id, &tags)?;
+                    let saved = self.store.tags(account_id, repo_id)?;
+                    self.tags.insert(repo_id, saved);
+                    self.selected = self.selected.min(self.visible().len().saturating_sub(1));
+                    self.status = "Local tags saved".into();
+                }
+                self.mode = Mode::Browse;
+                self.input.clear();
+            }
+            _ => {}
+        }
+
+        Ok(Action::None)
+    }
+
+    fn handle_global_key(&mut self, code: KeyCode) -> Option<Action> {
+        match code {
+            KeyCode::Char('q') => return Some(Action::Quit),
             KeyCode::Char('d') => {
+                self.switch_view(View::Activity);
                 self.feed_details = false;
-                self.view = View::Activity;
-                self.selected = 0;
-                self.detail = false;
                 self.detail_scroll = 0;
             }
-            KeyCode::Char('a') if self.view == View::Activity => {
+            KeyCode::Char('i') => {
+                self.switch_view(View::Issues);
+                return Some(Action::FetchIssues);
+            }
+            KeyCode::Char('b') => self.switch_view(View::Repositories),
+            KeyCode::Char('f') => self.switch_view(View::Focuses),
+            KeyCode::PageDown => self.detail_scroll = self.detail_scroll.saturating_add(10),
+            KeyCode::PageUp => self.detail_scroll = self.detail_scroll.saturating_sub(10),
+            KeyCode::Char('?') => self.help = true,
+            KeyCode::Tab => self.detail = !self.detail,
+            _ => return None,
+        }
+        Some(Action::None)
+    }
+
+    fn switch_view(&mut self, view: View) {
+        self.view = view;
+        self.selected = 0;
+        self.detail = false;
+    }
+
+    fn handle_repo_key(&mut self, code: KeyCode) -> Result<Action> {
+        match code {
+            KeyCode::Char('r') => return Ok(Action::Refresh),
+            KeyCode::Char('s') => self.start_editor(Mode::SaveFocus, String::new()),
+            KeyCode::Char('/') => self.start_editor(Mode::Search, self.query.clone()),
+            KeyCode::Char('t') => {
+                if let Some(repo) = self.current() {
+                    let repo_id = repo.id;
+                    self.edit_target = self.account.as_ref().map(|a| (a.id, repo_id));
+                    self.input = self
+                        .tags
+                        .get(&repo_id)
+                        .map(|t| t.join(", "))
+                        .unwrap_or_default();
+                    self.mode = Mode::Tags;
+                }
+            }
+
+            _ => {
+                return match self.pane {
+                    Pane::List => self.handle_repo_list_key(code),
+                    Pane::Details => self.handle_repo_details_key(code),
+                }
+            }
+        }
+        Ok(Action::None)
+    }
+
+    fn handle_repo_list_key(&mut self, code: KeyCode) -> Result<Action> {
+        match code {
+            KeyCode::Enter if self.current().is_some() => self.pane = Pane::Details,
+            KeyCode::Esc => {
+                self.query.clear();
+                self.selected = 0;
+            }
+            _ => self.handle_list_key(code),
+        }
+        Ok(Action::None)
+    }
+
+    fn handle_repo_details_key(&mut self, code: KeyCode) -> Result<Action> {
+        match code {
+            KeyCode::Esc => self.pane = Pane::List,
+            KeyCode::Char('o') => {
+                if let Some(repo) = self.current() {
+                    anyhow::ensure!(
+                        crate::issues::valid_repo_name(&repo.full_name),
+                        "Invalid GitHub repository name"
+                    );
+                    return Ok(Action::OpenRepository(format!(
+                        "https://github.com/{}",
+                        repo.full_name
+                    )));
+                }
+            }
+            _ => {}
+        }
+        Ok(Action::None)
+    }
+
+    fn handle_issue_key(&mut self, code: KeyCode) -> Result<Action> {
+        match code {
+            KeyCode::Char('r') => return Ok(Action::FetchIssues),
+            KeyCode::Char('s') => self.start_editor(Mode::SaveFocus, String::new()),
+            KeyCode::Char('/') => self.start_editor(Mode::IssueSearch, self.issue_query.clone()),
+            KeyCode::Char('o') => {
+                if let Some(issue) = self.current_issue() {
+                    anyhow::ensure!(
+                        crate::issues::valid_issue_url(&issue.url),
+                        "Issue URL is not a valid HTTPS github.com issue URL"
+                    );
+                    return Ok(Action::OpenIssue(issue.url.clone()));
+                }
+            }
+            KeyCode::Esc => {
+                self.issue_query.clear();
+                self.selected = 0;
+            }
+            _ => self.handle_list_key(code),
+        }
+        Ok(Action::None)
+    }
+
+    fn handle_focus_key(&mut self, code: KeyCode) -> Result<Action> {
+        match code {
+            KeyCode::Char('r') => return Ok(Action::Refresh),
+            KeyCode::Enter => {
+                if let Some(focus) = self.focuses.get(self.selected) {
+                    self.query = focus.repository_query.clone();
+                    self.issue_query = focus.issue_query.clone();
+                    self.view = View::Issues;
+                    self.selected = 0;
+                    self.detail = false;
+                    self.detail_scroll = 0;
+                    return Ok(Action::FetchIssues);
+                }
+            }
+            KeyCode::Esc => {
+                self.query.clear();
+                self.selected = 0;
+            }
+            _ => self.handle_list_key(code),
+        }
+        Ok(Action::None)
+    }
+
+    fn handle_activity_key(&mut self, code: KeyCode) -> Result<Action> {
+        match code {
+            KeyCode::Char('r') => return Ok(Action::FetchActivity),
+            KeyCode::Char('a') => {
                 if let (Some(account), Some(event)) = (&self.account, self.current_activity()) {
                     let (account_id, repo_id, key, acknowledged) = (
                         account.id,
@@ -373,15 +527,15 @@ impl App {
                     .into();
                 }
             }
-            KeyCode::Char('u') if self.view == View::Activity => {
+            KeyCode::Char('u') => {
                 self.unread_only = !self.unread_only;
                 self.selected = 0;
             }
-            KeyCode::Char('e') if self.view == View::Activity => {
+            KeyCode::Char('e') => {
                 self.feed_details = !self.feed_details;
                 self.detail_scroll = 0;
             }
-            KeyCode::Char('v') if self.view == View::Activity => {
+            KeyCode::Char('v') => {
                 if let Some(event) = self.current_activity() {
                     if matches!(
                         event.kind,
@@ -393,7 +547,7 @@ impl App {
                     self.status = "Select a PR change or review to fetch reviews".into();
                 }
             }
-            KeyCode::Char('o') if self.view == View::Activity => {
+            KeyCode::Char('o') => {
                 if let Some(event) = self.current_activity() {
                     anyhow::ensure!(
                         crate::activity::valid_activity_url(&event.url),
@@ -402,59 +556,18 @@ impl App {
                     return Ok(Action::OpenIssue(event.url.clone()));
                 }
             }
-            KeyCode::Char('r') => {
-                return Ok(if self.view == View::Activity {
-                    Action::FetchActivity
-                } else if self.view == View::Issues {
-                    Action::FetchIssues
-                } else {
-                    Action::Refresh
-                })
-            }
-            KeyCode::Char('i') if self.view == View::Repositories => {
-                self.view = View::Issues;
+
+            KeyCode::Esc => {
+                self.query.clear();
                 self.selected = 0;
-                self.detail = false;
-                return Ok(Action::FetchIssues);
             }
-            KeyCode::Char('b') => {
-                self.view = View::Repositories;
-                self.selected = 0;
-                self.detail = false;
-            }
-            KeyCode::Char('f') => {
-                self.view = View::Focuses;
-                self.selected = 0;
-                self.detail = false;
-            }
-            KeyCode::Char('s') if matches!(self.view, View::Repositories | View::Issues) => {
-                self.mode = Mode::SaveFocus;
-                self.input.clear();
-            }
-            KeyCode::Enter if self.view == View::Focuses => {
-                if let Some(focus) = self.focuses.get(self.selected) {
-                    self.query = focus.repository_query.clone();
-                    self.issue_query = focus.issue_query.clone();
-                    self.view = View::Issues;
-                    self.selected = 0;
-                    self.detail = false;
-                    self.detail_scroll = 0;
-                    return Ok(Action::FetchIssues);
-                }
-            }
-            KeyCode::Char('o') if self.view == View::Issues => {
-                if let Some(issue) = self.current_issue() {
-                    anyhow::ensure!(
-                        crate::issues::valid_issue_url(&issue.url),
-                        "Issue URL is not a valid HTTPS github.com issue URL"
-                    );
-                    return Ok(Action::OpenIssue(issue.url.clone()));
-                }
-            }
-            KeyCode::PageDown => self.detail_scroll = self.detail_scroll.saturating_add(10),
-            KeyCode::PageUp => self.detail_scroll = self.detail_scroll.saturating_sub(10),
-            KeyCode::Char('?') => self.help = true,
-            KeyCode::Tab => self.detail = !self.detail,
+            _ => self.handle_list_key(code),
+        }
+        Ok(Action::None)
+    }
+
+    fn handle_list_key(&mut self, code: KeyCode) {
+        match code {
             KeyCode::Down | KeyCode::Char('j') => {
                 self.selected = (self.selected + 1).min(self.list_len().saturating_sub(1));
                 self.detail_scroll = 0;
@@ -463,41 +576,13 @@ impl App {
                 self.selected = self.selected.saturating_sub(1);
                 self.detail_scroll = 0;
             }
-            KeyCode::Char('/') if matches!(self.view, View::Repositories | View::Issues) => {
-                self.input = if self.view == View::Issues {
-                    self.issue_query.clone()
-                } else {
-                    self.query.clone()
-                };
-                self.mode = if self.view == View::Issues {
-                    Mode::IssueSearch
-                } else {
-                    Mode::Search
-                };
-            }
-            KeyCode::Char('t') if self.view == View::Repositories => {
-                if let Some(repo) = self.current() {
-                    let repo_id = repo.id;
-                    self.edit_target = self.account.as_ref().map(|a| (a.id, repo_id));
-                    self.input = self
-                        .tags
-                        .get(&repo_id)
-                        .map(|t| t.join(", "))
-                        .unwrap_or_default();
-                    self.mode = Mode::Tags;
-                }
-            }
-            KeyCode::Esc => {
-                if self.view == View::Issues {
-                    self.issue_query.clear();
-                } else {
-                    self.query.clear();
-                }
-                self.selected = 0;
-            }
             _ => {}
         }
-        Ok(Action::None)
+    }
+
+    fn start_editor(&mut self, mode: Mode, input: String) {
+        self.mode = mode;
+        self.input = input;
     }
 }
 

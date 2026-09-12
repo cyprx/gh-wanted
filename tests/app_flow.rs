@@ -11,6 +11,71 @@ use ratatui::{backend::TestBackend, Terminal};
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
+
+#[test]
+fn repo_pane_focus_and_editor_escape_are_independent() {
+    use gh_wanted::app::Pane;
+    let mut app = app();
+    let mut other = app.repositories[0].clone();
+    other.id = 2;
+    other.full_name = "demo/other".into();
+    app.repositories.push(other);
+    app.key(key(KeyCode::Enter)).unwrap();
+    assert_eq!(app.pane, Pane::Details);
+    app.key(key(KeyCode::Char('j'))).unwrap();
+    assert_eq!(app.selected, 0);
+    app.key(key(KeyCode::Char('t'))).unwrap();
+    app.key(key(KeyCode::Char('b'))).unwrap();
+    assert_eq!(app.input, "b");
+    app.key(key(KeyCode::Esc)).unwrap();
+    assert_eq!(app.mode, Mode::Browse);
+    assert_eq!(app.pane, Pane::Details);
+    app.key(key(KeyCode::Esc)).unwrap();
+    assert_eq!(app.pane, Pane::List);
+    app.key(key(KeyCode::Char('j'))).unwrap();
+    assert_eq!(app.selected, 1);
+    app.query = "no matching repository".into();
+    app.key(key(KeyCode::Enter)).unwrap();
+    assert_eq!(app.pane, Pane::List);
+}
+
+#[test]
+fn repo_focus_does_not_capture_keys_in_other_views() {
+    use gh_wanted::{app::Pane, focus::Focus};
+    let mut app = app();
+    app.key(key(KeyCode::Enter)).unwrap();
+    app.focuses = ["one", "two"]
+        .into_iter()
+        .map(|name| Focus {
+            name: name.into(),
+            repository_query: String::new(),
+            issue_query: String::new(),
+        })
+        .collect();
+    app.key(key(KeyCode::Char('f'))).unwrap();
+    app.key(key(KeyCode::Char('j'))).unwrap();
+    assert_eq!(app.selected, 1);
+    app.key(key(KeyCode::Char('i'))).unwrap();
+    app.issue_query = "some query".into();
+    app.key(key(KeyCode::Esc)).unwrap();
+    assert!(app.issue_query.is_empty());
+    assert_eq!(app.pane, Pane::Details);
+}
+
+#[test]
+fn repository_open_is_scoped_to_details_and_validates_name() {
+    let mut app = app();
+    assert!(matches!(
+        app.key(key(KeyCode::Char('o'))).unwrap(),
+        Action::None
+    ));
+    app.key(key(KeyCode::Enter)).unwrap();
+    assert!(
+        matches!(app.key(key(KeyCode::Char('o'))).unwrap(), Action::OpenRepository(url) if url == "https://github.com/demo/rust")
+    );
+    app.repositories[0].full_name = "demo/rust?redirect=elsewhere".into();
+    assert!(app.key(key(KeyCode::Char('o'))).is_err());
+}
 fn app() -> App {
     let mut app = App::new(Store::memory().unwrap(), true);
     let account = Account {

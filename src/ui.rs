@@ -1,4 +1,4 @@
-use crate::app::{clean, App, Mode, View};
+use crate::app::{clean, App, Mode, Pane, View};
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -17,10 +17,10 @@ const TOPIC: Color = Color::Rgb(139, 201, 188);
 const SELECTED: Color = Color::Rgb(48, 62, 65);
 const WARNING: Color = Color::Rgb(241, 157, 126);
 
-fn panel(title: impl Into<String>) -> Block<'static> {
+fn panel(title: impl Into<String>, is_active: bool) -> Block<'static> {
     Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(BORDER))
+        .border_style(Style::default().fg(if is_active { ACCENT } else { BORDER }))
         .title_style(Style::default().fg(TEXT).add_modifier(Modifier::BOLD))
         .style(Style::default().fg(TEXT).bg(SURFACE))
         .title(Line::styled(
@@ -191,7 +191,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_header(frame, app, rows[0]);
     draw_shortcuts(frame, app, rows[4]);
     if app.help {
-        frame.render_widget(Paragraph::new("j/k or arrows move. Tab details. PgUp/PgDn scroll. q/Ctrl-C quit.\nb repositories; / filters topic:rust tag:priority; t edits local tags.\ni issues; / filters label:\"good first issue\" state:open unassigned keyword.\nLabels use AND; state is open/closed/all; keywords search title/body.\ns saves both filters; f lists focuses; Enter reopens one.\nd Today and catch-up across the current repository filter.\na toggles acknowledgment locally. Opening/refreshing never marks read.\nu toggles unread-only. Older unread items remain in catch-up.\ne shows per-feed errors/checkpoints; PgUp/PgDn scroll; e returns.\nv loads reviews for the selected PR change/review on demand.\no opens a validated GitHub URL. r refreshes the current view.\nActivity refreshes every 15 minutes while running, without overlapping.\nAuth failures pause automatic refresh; rate-limit retry times are honored.\nFirst activity sync covers 24h. Checkpoints survive restart.\nLocal tags, focuses, and read state stay on this machine.\nAny key closes help.").wrap(Wrap { trim: false }).block(panel("").title(" Help ")), rows[1]);
+        frame.render_widget(Paragraph::new("j/k or arrows move. Tab details. PgUp/PgDn scroll. q/Ctrl-C quit.\nb repositories; / filters topic:rust tag:priority; t edits local tags.\ni issues; / filters label:\"good first issue\" state:open unassigned keyword.\nLabels use AND; state is open/closed/all; keywords search title/body.\ns saves both filters; f lists focuses; Enter reopens one.\nd Today and catch-up across the current repository filter.\na toggles acknowledgment locally. Opening/refreshing never marks read.\nu toggles unread-only. Older unread items remain in catch-up.\ne shows per-feed errors/checkpoints; PgUp/PgDn scroll; e returns.\nv loads reviews for the selected PR change/review on demand.\no opens a validated GitHub URL. r refreshes the current view.\nActivity refreshes every 15 minutes while running, without overlapping.\nAuth failures pause automatic refresh; rate-limit retry times are honored.\nFirst activity sync covers 24h. Checkpoints survive restart.\nLocal tags, focuses, and read state stay on this machine.\nAny key closes help.").wrap(Wrap { trim: false }).block(panel("", false).title(" Help ")), rows[1]);
     } else if app.view == View::Activity {
         draw_activity(frame, app, rows[1]);
     } else if app.view != View::Repositories {
@@ -237,7 +237,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
                     ])
                 })
                 .collect();
-            let block = panel("").title(format!(
+            let block = panel("", app.pane == Pane::List).title(format!(
                 " Watched repositories ({}/{}) ",
                 visible.len(),
                 app.repositories.len()
@@ -313,13 +313,15 @@ pub fn draw(frame: &mut Frame, app: &App) {
                         Line::styled(tags, Style::default().fg(ACCENT)),
                         Line::from(""),
                         metadata("t  edit local tags"),
+                        Line::from(""),
+                        metadata("o  open in external browser"),
                     ]);
                     lines
                 })
                 .unwrap_or_else(|| vec![metadata("Select a repository to explore.")]);
             frame.render_widget(
                 Paragraph::new(body)
-                    .block(panel("").title(" Repository "))
+                    .block(panel("", app.pane == Pane::Details).title(" Repository "))
                     .wrap(Wrap { trim: false }),
                 pane,
             );
@@ -382,7 +384,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
                 TEXT
             }))
             .block(
-                panel("")
+                panel("", false)
                     .title(label)
                     .padding(Padding::horizontal(1))
                     .border_style(Style::default().fg(if app.mode == Mode::Browse {
@@ -416,7 +418,7 @@ fn draw_discovery(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     if app.view == View::Focuses {
         let columns = panes(area, false);
         if app.focuses.is_empty() {
-            frame.render_widget(Paragraph::new("No saved focuses yet. Press b, filter repositories, then i to browse issues. Set an issue filter with / and press s to save both filters.").wrap(Wrap { trim: true }).block(panel("").title(" Saved focuses ")), area);
+            frame.render_widget(Paragraph::new("No saved focuses yet. Press b, filter repositories, then i to browse issues. Set an issue filter with / and press s to save both filters.").wrap(Wrap { trim: true }).block(panel("", false).title(" Saved focuses ")), area);
         } else {
             let items: Vec<_> = app
                 .focuses
@@ -435,7 +437,10 @@ fn draw_discovery(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 .collect();
             frame.render_stateful_widget(
                 List::new(items)
-                    .block(panel(format!(" Saved focuses ({}) ", app.focuses.len())))
+                    .block(panel(
+                        format!(" Saved focuses ({}) ", app.focuses.len()),
+                        false,
+                    ))
                     .highlight_style(selected())
                     .highlight_symbol("› "),
                 columns[0],
@@ -473,7 +478,7 @@ fn draw_discovery(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 frame.render_widget(
                     Paragraph::new(lines)
                         .wrap(Wrap { trim: false })
-                        .block(panel(" Focus preview ")),
+                        .block(panel(" Focus preview ", false)),
                     columns[1],
                 );
             }
@@ -530,7 +535,7 @@ fn draw_discovery(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let columns = panes(rows[1], app.detail);
     let issues = app.visible_issues();
     if !app.detail {
-        let block = panel(format!(" Issues ({}) ", issues.len()));
+        let block = panel(format!(" Issues ({}) ", issues.len()), false);
         if issues.is_empty() {
             let text = if visible.is_empty() {
                 "No repositories match. Press b and change the repository filter with /."
@@ -614,7 +619,7 @@ fn draw_discovery(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             Paragraph::new(body)
                 .wrap(Wrap { trim: false })
                 .scroll((app.detail_scroll, 0))
-                .block(panel(" Issue details ")),
+                .block(panel(" Issue details ", false)),
             *columns.last().unwrap(),
         );
     }
@@ -709,14 +714,14 @@ fn draw_activity(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             Paragraph::new(lines.join("\n"))
                 .wrap(Wrap { trim: false })
                 .scroll((app.detail_scroll, 0))
-                .block(panel("").title(" Activity feeds ")),
+                .block(panel("", false).title(" Activity feeds ")),
             rows[1],
         );
         return;
     }
     let columns = panes(rows[1], app.detail);
     if !app.detail {
-        let block = panel(" Activity inbox ");
+        let block = panel(" Activity inbox ", false);
         if events.is_empty() {
             let message = if ids.is_empty() {
                 "No repositories match. Press b to change repository filters."
@@ -831,7 +836,7 @@ fn draw_activity(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             Paragraph::new(body)
                 .wrap(Wrap { trim: false })
                 .scroll((app.detail_scroll, 0))
-                .block(panel(" Update details ")),
+                .block(panel(" Update details ", false)),
             *columns.last().unwrap(),
         );
     }
