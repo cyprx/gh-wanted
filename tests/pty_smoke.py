@@ -1,5 +1,6 @@
 """Offline PTY smoke test. Run in Linux after cargo build."""
 import fcntl
+import json
 import os
 import pty
 import re
@@ -21,10 +22,12 @@ process = subprocess.Popen(["target/debug/gh-wanted", "--demo"], stdin=slave, st
                            preexec_fn=attach, env={**os.environ, "TERM": "xterm-256color"})
 transcript = bytearray()
 screen = [[" "] * 120 for _ in range(32)]
+styles = [[("#14181d", "#e6e4dc", False)] * 120 for _ in range(32)]
+foreground, background, bold = "#e6e4dc", "#14181d", False
 row = column = 0
 
 def render(data):
-    global row, column
+    global row, column, foreground, background, bold
     for token in re.findall(r"\x1b\[[0-?]*[ -/]*[@-~]|[^\x1b]", data.decode("utf-8", errors="replace")):
         if token.startswith("\x1b["):
             command = token[-1]
@@ -32,6 +35,21 @@ def render(data):
             if args.startswith("?"):
                 continue
             numbers = [int(n) if n else 0 for n in args.split(";")]
+            if command == "m":
+                i = 0
+                while i < len(numbers):
+                    n = numbers[i]
+                    if n == 0: foreground, background, bold = "#e6e4dc", "#14181d", False
+                    elif n == 1: bold = True
+                    elif n == 22: bold = False
+                    elif n == 39: foreground = "#e6e4dc"
+                    elif n == 49: background = "#14181d"
+                    elif n in (38, 48) and i + 4 < len(numbers) and numbers[i + 1] == 2:
+                        color = "#%02x%02x%02x" % tuple(numbers[i + 2:i + 5])
+                        if n == 38: foreground = color
+                        else: background = color
+                        i += 4
+                    i += 1
             if command in "Hf":
                 row = (numbers[0] or 1) - 1
                 column = (numbers[1] if len(numbers) > 1 else 1) - 1
@@ -47,7 +65,9 @@ def render(data):
         elif token == "\r": column = 0
         elif token == "\n": row += 1
         elif token.isprintable():
-            if 0 <= row < 32 and 0 <= column < 120: screen[row][column] = token
+            if 0 <= row < 32 and 0 <= column < 120:
+                screen[row][column] = token
+                styles[row][column] = (background, foreground, bold)
             column += 1
     return "\n".join("".join(line) for line in screen).encode()
 
@@ -67,19 +87,29 @@ def send(text):
     os.write(master, text.encode())
     return read_for()
 
+def capture(name):
+    directory = os.environ.get("GH_WANTED_CAPTURE_DIR")
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+        with open(os.path.join(directory, name + ".json"), "w") as output:
+            json.dump({"screen": screen, "styles": styles}, output)
+
 try:
     assert b"DEMO" in read_for(1)
+    capture("repositories")
     send("t")
     send("priority\r")
     send("/")
     send("topic:rust tag:priority\r")
     issue_view = send("i")
     assert b"Improve keyboard navigation" in issue_view, issue_view
+    capture("issues")
     send("/")
     send('label:"good first issue" unassigned\r')
     send("s")
     assert b"Focus saved" in send("Rust starters\r")
     assert b"Rust starters" in send("f")
+    capture("focuses")
     reopened = send("\r")
     assert b"Improve keyboard navigation" in reopened
     detail = send("\t")
@@ -88,6 +118,7 @@ try:
     daily = send("d")
     assert b"Today (" in daily and b"Catch-up (" in daily
     assert b"Contributor shared a reproduction" in daily
+    capture("today")
     assert b"[read]" in send("a")
     assert b"[read]" in send("r"), "Refresh changed acknowledgment"
     send("u")

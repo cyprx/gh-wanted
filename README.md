@@ -37,6 +37,8 @@ nix develop path:. -c cargo run -- --demo
 
 ## Keys
 
+The interface uses a charcoal palette with amber navigation, teal GitHub topics, and padded list/detail panels. The active tab and selected row are labeled as well as colored. A terminal of 100 × 30 or larger is recommended; compact views work from 42 × 14. Font choice remains controlled by your terminal.
+
 | Key | Action |
 | --- | --- |
 | j/k or arrows | Move through the current list |
