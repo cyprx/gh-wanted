@@ -103,12 +103,89 @@ impl GhClient {
     }
 
     fn api(&self, endpoint: &str, paginate: bool) -> Result<Vec<u8>> {
+        self.api_options(endpoint, paginate, false)
+    }
+
+    pub fn activity(
+        &self,
+        request: &crate::sync::FeedRequest,
+    ) -> Result<Vec<crate::activity::Activity>> {
+        anyhow::ensure!(
+            crate::issues::valid_repo_name(&request.repo.full_name),
+            "Invalid repository name"
+        );
+        if self.account()? != request.account {
+            return Err(crate::sync::RequestFailure {
+                paused: true,
+                retry_at: None,
+            }
+            .into());
+        }
+        let name = &request.repo.full_name;
+        let since = crate::activity::iso(request.state.lower())?;
+        let endpoint = match request.state.feed.as_str() {
+            "issues" => format!("repos/{name}/issues?state=all&sort=updated&direction=asc&since={since}&per_page=100"),
+            "comments" => format!("repos/{name}/issues/comments?sort=updated&direction=asc&since={since}&per_page=100"),
+            feed => {
+                let pr = feed.strip_prefix("reviews:").context("Unknown activity feed")?.parse::<u64>()?;
+                anyhow::ensure!(pr > 0, "Invalid PR number");
+                format!("repos/{name}/pulls/{pr}/reviews?per_page=100")
+            }
+        };
+        let mut page = 1_u64;
+        let mut total = 0;
+        let mut values = Vec::new();
+        loop {
+            let response = self.api_options(&format!("{endpoint}&page={page}"), false, true)?;
+            total += response.len();
+            anyhow::ensure!(
+                total <= OUTPUT_LIMIT,
+                "Activity feed exceeded the 16 MiB limit; checkpoint unchanged"
+            );
+            let (headers, body) = split_response(&response)?;
+            let records: Vec<serde_json::Value> = serde_json::from_slice(body)
+                .map_err(|_| anyhow!("GitHub returned an invalid activity page"))?;
+            values.extend(records);
+            if !headers.lines().any(|line| {
+                line.split_once(':').is_some_and(|(name, value)| {
+                    name.eq_ignore_ascii_case("link") && value.contains("rel=\"next\"")
+                })
+            }) {
+                break;
+            }
+            page += 1;
+        }
+        if self.account()? != request.account {
+            return Err(crate::sync::RequestFailure {
+                paused: true,
+                retry_at: None,
+            }
+            .into());
+        }
+        let mut events = crate::activity::parse_records(
+            request.repo.id,
+            &request.state.feed,
+            values,
+            request.state.lower(),
+            request.upper,
+        )?;
+        let fetched_at = chrono::Utc::now().timestamp();
+        for event in &mut events {
+            event.fetched_at = fetched_at;
+        }
+        Ok(events)
+    }
+
+    fn api_options(&self, endpoint: &str, paginate: bool, headers: bool) -> Result<Vec<u8>> {
         anyhow::ensure!(
             !self.cancellation.load(Ordering::Relaxed),
             "GitHub sync cancelled"
         );
         let mut command = Command::new(&self.program);
         command.args(["api", "--hostname", "github.com", endpoint]);
+        if headers {
+            command.arg("--include");
+        }
         if paginate {
             command.args(["--paginate", "--slurp"]);
         }
@@ -171,6 +248,7 @@ fn collect(
 ) -> Result<Vec<u8>> {
     let started = Instant::now();
     let mut output = Vec::new();
+    let mut stderr = Vec::new();
     let mut total = 0usize;
     let mut ended = 0;
     let mut status = None;
@@ -190,7 +268,12 @@ fn collect(
         if ended == 2 {
             if let Some(status) = status {
                 if !status.success() {
-                    bail!("GitHub CLI request failed; check authentication and network access");
+                    return Err(crate::sync::request_failure(
+                        &output,
+                        &stderr,
+                        chrono::Utc::now().timestamp(),
+                    )
+                    .into());
                 }
                 return Ok(output);
             }
@@ -205,6 +288,8 @@ fn collect(
                 }
                 if stdout {
                     output.extend_from_slice(&bytes);
+                } else {
+                    stderr.extend_from_slice(&bytes);
                 }
             }
             Ok(PipeEvent::End) => ended += 1,
@@ -270,4 +355,29 @@ pub fn parse_issues(repo_id: u64, bytes: &[u8]) -> Result<Vec<crate::issues::Iss
         }
     }
     Ok(issues.into_values().collect())
+}
+
+fn split_response(response: &[u8]) -> Result<(&str, &[u8])> {
+    let split = response
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|i| (i, 4))
+        .or_else(|| {
+            response
+                .windows(2)
+                .position(|w| w == b"\n\n")
+                .map(|i| (i, 2))
+        })
+        .context("GitHub response missing HTTP headers; checkpoint unchanged")?;
+    let headers = std::str::from_utf8(&response[..split.0]).context("Invalid HTTP headers")?;
+    let status = headers
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .context("Missing HTTP status")?;
+    anyhow::ensure!(
+        status == "200",
+        "Unexpected GitHub response status; checkpoint unchanged"
+    );
+    Ok((headers, &response[split.0 + split.1..]))
 }

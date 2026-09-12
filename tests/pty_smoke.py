@@ -85,12 +85,22 @@ try:
     detail = send("\t")
     assert b"regression test" in detail or b"regression test" in transcript
     assert b"fictional" in send("o")
+    daily = send("d")
+    assert b"Today (" in daily and b"Catch-up (" in daily
+    assert b"Contributor shared a reproduction" in daily
+    assert b"[read]" in send("a")
+    assert b"[read]" in send("r"), "Refresh changed acknowledgment"
+    send("u")
+    assert b"PR: Improve empty-list navigation" in send("v")
+    statuses = send("e")
+    assert b"reviews:2" in statuses and b"Checkpoint:" in statuses
+    send("e")
     print("\n".join("".join(line).rstrip() for line in screen))
     send("q")
     assert process.wait(timeout=3) == 0
     assert termios.tcgetattr(slave) == before, "Terminal settings were not restored"
     assert b"\x1b[?1049l" in transcript, "Alternate screen was not restored"
-    print("PASS: tag -> repository filter -> issue filter -> save -> reopen -> details -> safe demo browser action -> quit; terminal restored")
+    print("PASS: repository/focus flow -> Today/catch-up -> acknowledgment survives refresh -> PR reviews -> feed checkpoints -> quit; terminal restored")
 finally:
     if process.poll() is None:
         process.kill()
@@ -98,5 +108,5 @@ finally:
     os.close(master)
     os.close(slave)
     os.makedirs("target", exist_ok=True)
-    with open("target/milestone-2-pty.log", "wb") as output:
+    with open("target/milestone-3-pty.log", "wb") as output:
         output.write(transcript)

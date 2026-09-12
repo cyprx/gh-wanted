@@ -2,7 +2,7 @@
 
 Find where you're needed. A Rust TUI for organizing watched GitHub repositories by their upstream topics and your own local tags.
 
-## Milestones 1 and 2
+## Milestones 1 through 3
 
 - Import watched repositories from github.com through `gh`.
 - Read GitHub topics and edit private local tags.
@@ -11,8 +11,9 @@ Find where you're needed. A Rust TUI for organizing watched GitHub repositories 
 - Explore fictional repositories with `--demo`, using temporary in-memory storage.
 - Browse issues across filtered repositories, with label, keyword, state, and unassigned filters.
 - Save named focuses that restore both filters and follow current repository membership.
+- Review Today and earlier unread activity with persistent checkpoints and local acknowledgment.
 
-Daily digests, PR tracking, and local Git actions belong to later milestones.
+The full contributions workspace, CI tracking, and local Git actions belong to later milestones.
 
 ## Run locally
 
@@ -38,17 +39,22 @@ nix develop path:. -c cargo run -- --demo
 
 | Key | Action |
 | --- | --- |
-| j/k or arrows | Move through repositories |
-| Tab | Toggle full repository details |
+| j/k or arrows | Move through the current list |
+| Tab | Toggle full details |
 | / | Edit filter; Enter applies, Esc cancels |
 | t | Edit comma-separated local tags; Enter saves |
 | i | Browse issues from all matching repositories |
 | b | Return to repositories |
 | s | Save repository and issue filters as a named focus |
 | f | List saved focuses; Enter reopens one |
-| o | Open selected issue in the browser (disabled in demo) |
-| PgUp/PgDn | Scroll issue details |
-| r | Refresh watched repositories |
+| d | Show Today and catch-up activity |
+| a | Toggle local acknowledgment of selected activity |
+| u | Toggle unread-only activity |
+| e | Show/hide activity feed checkpoints and failures |
+| v | Load reviews for the selected PR activity on demand |
+| o | Open selected issue/activity in the browser (disabled in demo) |
+| PgUp/PgDn | Scroll details or feed status |
+| r | Refresh the current view |
 | ? | Show keyboard help |
 | Esc | Clear active filter when browsing |
 | q or Ctrl-C | Quit |
@@ -69,7 +75,19 @@ Focus names are trimmed, case-insensitively unique, and limited to 128 UTF-8 byt
 
 Issue fetches are read-only, per repository, paginated, and explicitly sorted by update time. PR records are excluded. The completion count stays incomplete until every selected repository succeeds. A timeout, failed page, or output-limit failure retains any previous results for that repository with a stale/incomplete indicator; `r` retries. Issues are held in memory and reloaded when a focus is reopened. Large feeds can exceed the existing 30-second/16 MiB request bounds and remain visibly incomplete. There is one background refresh at a time; if another refresh is running, press `r` after it finishes.
 
-The database upgrades transactionally from schema 1 to schema 2, preserving repositories and tags. Older milestone-1 binaries cannot open schema 2.
+The database upgrades transactionally from schema 1 or 2 to schema 3, preserving repositories, tags, and focuses. Older milestone binaries cannot open schema 3.
+
+## Today and catch-up
+
+Press `d` after connecting. Activity sync starts after repository loading, then runs every 15 minutes while the app is open. It fetches all watched repositories; the current repository filter controls what the daily view displays. Repository and issue discovery refreshes remain manual. All refreshes share one worker, so a slow request does not block navigation or overlap another sync.
+
+Today uses the host's local calendar date, including timezone and daylight-saving rules. It includes both read and unread activity. Catch-up contains earlier unread items and keeps them until you explicitly acknowledge them with `a`. Opening details or refreshing never marks activity read. `u` shows only unread items. Activity, read state, and checkpoints survive restart, partitioned by GitHub account.
+
+Each issue/comment feed starts with the last 24 hours. That initial boundary persists even if the first fetch fails. Later refreshes query from the last successful checkpoint with a 60-second overlap, deduplicate source IDs and versions, and atomically save activity with the new checkpoint. A failed page, timeout, cancellation, or failed save leaves the checkpoint unchanged. `e` shows each feed's checkpoint and error; `r` retries after any rate-limit deadline. Authentication/permission failures pause automatic requests until a manual retry. Rate-limit response headers set the minimum retry time; no background process runs after quitting.
+
+The feed distinguishes new issues, issue changes, comments, PR changes, and submitted reviews. Author association is shown as supplied by GitHub; a generic timestamp change is never described as a maintainer reply or a CI result. Select PR activity and press `v` to fetch its reviews. Review fetching is on demand and uses its own checkpoint; it rereads the initial review window to detect review-state changes. Pending reviews are excluded. Review discussion threads and CI checks belong to later contributions work.
+
+Polling captures available snapshots, not a complete event audit: deleted/inaccessible records and intermediate edits may be unavailable, late indexing outside the overlap may be missed, and review edits without a changed state or source timestamp may not create another item. A long absence can exceed the 16 MiB activity-feed limit; the feed remains visibly incomplete and its checkpoint does not advance. Issue/comment activity pages each retain the 30-second CLI timeout. Demo data includes Today, catch-up, acknowledgment, and a PR review without using real GitHub data.
 
 ## Docker builds and tests
 
@@ -92,7 +110,7 @@ Persistent data uses the platform local-data directory from the `directories` cr
 
 Tags follow stable repository IDs across renames and remain stored when a repository is no longer watched. Each GitHub account has separate cached repositories and tags. The app verifies the active account before loading its cache, so an offline startup cannot load a cached account automatically. Once connected, refresh errors retain cached data with a stale-data message.
 
-Refresh runs in the background, with one sync at a time. Each `gh` call has a 30-second timeout and a 16 MiB combined output limit. Errors preserve stored data; corrupt or newer database schemas are reported instead of reset. Press `r` to retry authentication, connectivity, or rate-limit failures. Refresh is manual in milestone 1.
+Refresh runs in the background, with one sync at a time. Each `gh` call has a 30-second timeout and a 16 MiB combined output limit. Errors preserve stored data; corrupt or newer database schemas are reported instead of reset. Press `r` to retry authentication or connectivity failures; rate-limit deadlines also apply to manual retries.
 
 ## Development checks
 

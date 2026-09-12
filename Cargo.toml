@@ -7,6 +7,7 @@ description = "A terminal watchlist for open-source contributors"
 
 [dependencies]
 anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 crossterm = "0.29"
 directories = "6"
 ratatui = "0.30.2"

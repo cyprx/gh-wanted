@@ -1,7 +1,9 @@
+pub mod activity;
 pub mod app;
 pub mod focus;
 pub mod github;
 pub mod issues;
 pub mod repositories;
 pub mod store;
+pub mod sync;
 pub mod ui;

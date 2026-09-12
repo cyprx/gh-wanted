@@ -23,6 +23,93 @@ enum Update {
     Done(Result<Snapshot>),
     Issues(u64, u64, Result<Vec<gh_wanted::issues::Issue>>),
     IssuesDone,
+    Activity(
+        gh_wanted::sync::FeedRequest,
+        Result<Vec<gh_wanted::activity::Activity>>,
+    ),
+    ActivityDone,
+}
+
+fn start_activity(
+    sender: SyncSender<Update>,
+    cancellation: Arc<AtomicBool>,
+    requests: Vec<gh_wanted::sync::FeedRequest>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let client = GhClient::default().with_cancellation(cancellation.clone());
+        let mut stop: Option<(bool, Option<i64>)> = None;
+        for request in requests {
+            if cancellation.load(Ordering::Relaxed) {
+                break;
+            }
+            let result = if let Some((paused, retry_at)) = stop {
+                Err(gh_wanted::sync::RequestFailure { paused, retry_at }.into())
+            } else {
+                client.activity(&request)
+            };
+            if let Err(error) = &result {
+                if let Some(policy) = error.downcast_ref::<gh_wanted::sync::RequestFailure>() {
+                    if policy.paused || policy.retry_at.is_some() {
+                        stop = Some((policy.paused, policy.retry_at));
+                    }
+                }
+            }
+            if sender.send(Update::Activity(request, result)).is_err() {
+                return;
+            }
+        }
+        let _ = sender.send(Update::ActivityDone);
+    })
+}
+
+fn demo_activity(app: &mut App, requests: Vec<gh_wanted::sync::FeedRequest>) -> Result<()> {
+    use gh_wanted::activity::{Activity, ActivityKind};
+    for request in requests {
+        let anchor = request.state.initial_since + gh_wanted::sync::INITIAL_HISTORY_SECONDS;
+        let kind = match request.state.feed.as_str() {
+            "issues" => ActivityKind::NewIssue,
+            "comments" => ActivityKind::Comment,
+            _ => ActivityKind::Review,
+        };
+        let occurred_at = if kind == ActivityKind::Comment {
+            anchor - 86399
+        } else {
+            anchor
+        };
+        let number = request
+            .state
+            .feed
+            .strip_prefix("reviews:")
+            .and_then(|n| n.parse::<u64>().ok())
+            .unwrap_or(1);
+        let mut events = vec![Activity { repo_id: request.repo.id, key: format!("demo-{:?}",kind), source_id: 1, number: 1, kind: kind.clone(), title: if kind == ActivityKind::Comment { "Contributor shared a reproduction" } else if kind == ActivityKind::Review { "Review: APPROVED" } else { "Improve keyboard navigation" }.into(), body: "Try the keyboard flow and acknowledge this update locally. Refresh keeps your read state.".into(), actor: "demo-contributor".into(), association: "CONTRIBUTOR".into(), url: format!("https://github.com/{}/issues/1",request.repo.full_name), occurred_at, fetched_at: app.now, acknowledged: false }];
+        if kind == ActivityKind::Review {
+            events[0].number = number;
+            events[0].key = format!("demo-review-{number}");
+            events[0].url = format!(
+                "https://github.com/{}/pull/{number}",
+                request.repo.full_name
+            );
+        }
+        if request.state.feed == "issues" {
+            events.push(Activity {
+                kind: ActivityKind::PrChange,
+                key: "demo-pr".into(),
+                source_id: 2,
+                number: 2,
+                title: "PR: Improve empty-list navigation".into(),
+                url: format!("https://github.com/{}/pull/2", request.repo.full_name),
+                ..events[0].clone()
+            });
+        }
+        events.retain(|event| {
+            event.occurred_at >= request.state.lower() && event.occurred_at <= request.upper
+        });
+        app.apply_activity(&request, Ok(events))?;
+    }
+    app.busy = false;
+    app.status = "Demo activity ready. d opens Today; a acknowledges; v loads PR reviews".into();
+    Ok(())
 }
 
 fn start_issues(
@@ -33,11 +120,23 @@ fn start_issues(
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let client = GhClient::default().with_cancellation(cancellation.clone());
+        let mut stop: Option<(bool, Option<i64>)> = None;
         for repo in repos {
             if cancellation.load(Ordering::Relaxed) {
                 break;
             }
-            let result = client.issues(&account, &repo);
+            let result = if let Some((paused, retry_at)) = stop {
+                Err(gh_wanted::sync::RequestFailure { paused, retry_at }.into())
+            } else {
+                client.issues(&account, &repo)
+            };
+            if let Err(error) = &result {
+                if let Some(policy) = error.downcast_ref::<gh_wanted::sync::RequestFailure>() {
+                    if policy.paused || policy.retry_at.is_some() {
+                        stop = Some((policy.paused, policy.retry_at));
+                    }
+                }
+            }
             if sender
                 .send(Update::Issues(account.id, repo.id, result))
                 .is_err()
@@ -62,7 +161,10 @@ fn demo_issues(app: &mut App, repos: &[Repository]) {
 }
 
 fn open_issue(url: &str) -> Result<()> {
-    anyhow::ensure!(gh_wanted::issues::valid_issue_url(url), "Invalid issue URL");
+    anyhow::ensure!(
+        gh_wanted::activity::valid_activity_url(url),
+        "Invalid GitHub URL"
+    );
     #[cfg(target_os = "macos")]
     let mut command = {
         let mut c = std::process::Command::new("open");
@@ -149,7 +251,20 @@ fn demo(app: &mut App) -> Result<()> {
 fn updates(app: &mut App, receiver: &Receiver<Update>) {
     while let Ok(update) = receiver.try_recv() {
         let result = match update {
+            Update::Activity(request, result) => app.apply_activity(&request, result),
+            Update::ActivityDone => {
+                app.busy = false;
+                app.activity_pending.clear();
+                app.next_refresh = app.now.saturating_add(gh_wanted::sync::REFRESH_SECONDS);
+                if app.feeds.iter().all(|f| f.error.is_none()) {
+                    app.status = "Activity saved. d Today/catch-up; a acknowledge; refresh every 15 minutes while running".into();
+                }
+                Ok(())
+            }
             Update::Issues(account, repo, result) => {
+                if let Err(error) = &result {
+                    app.observe_failure(error);
+                }
                 app.apply_issues(account, repo, result);
                 Ok(())
             }
@@ -165,6 +280,7 @@ fn updates(app: &mut App, receiver: &Receiver<Update>) {
             }
         };
         if let Err(error) = result {
+            app.observe_failure(&error);
             app.status = format!("Refresh failed: {error}. Cached data may be stale. r retries.");
         }
     }
@@ -196,6 +312,8 @@ fn run() -> Result<()> {
     let mut worker = None;
     if is_demo {
         demo(&mut app)?;
+        let requests = app.prepare_activity(true, None)?;
+        demo_activity(&mut app, requests)?;
     } else {
         app.busy = true;
         worker = Some(start_sync(sender.clone(), cancellation.clone()));
@@ -203,14 +321,64 @@ fn run() -> Result<()> {
     let mut terminal = ratatui::init();
     let result = (|| -> Result<()> {
         loop {
+            app.now = chrono::Utc::now().timestamp();
             updates(&mut app, &receiver);
+            if app.auto_due() {
+                match app.prepare_activity(false, None) {
+                    Ok(requests) if !requests.is_empty() => {
+                        worker = Some(start_activity(
+                            sender.clone(),
+                            cancellation.clone(),
+                            requests,
+                        ))
+                    }
+                    Err(error) => {
+                        app.status = format!("Automatic activity refresh failed: {error}");
+                        app.next_refresh = app.now.saturating_add(gh_wanted::sync::REFRESH_SECONDS);
+                    }
+                    _ => {}
+                }
+            }
             terminal.draw(|frame| ui::draw(frame, &app))?;
             if event::poll(Duration::from_millis(100))? {
                 if let Event::Key(key) = event::read()? {
                     if key.kind != KeyEventKind::Press {
                         continue;
                     }
-                    match app.key(key) {
+                    let action = app.key(key);
+                    if matches!(
+                        &action,
+                        Ok(Action::Refresh
+                            | Action::FetchIssues
+                            | Action::FetchActivity
+                            | Action::FetchReviews(..))
+                    ) {
+                        if let Err(error) = app.check_network_window() {
+                            app.status = error.to_string();
+                            continue;
+                        }
+                    }
+                    match action {
+                        Ok(action @ (Action::FetchActivity | Action::FetchReviews(..))) => {
+                            let review = match action {
+                                Action::FetchReviews(repo, number) => Some((repo, number)),
+                                _ => None,
+                            };
+                            match app.prepare_activity(true, review) {
+                                Ok(requests) if is_demo => demo_activity(&mut app, requests)?,
+                                Ok(requests) if !requests.is_empty() => {
+                                    worker = Some(start_activity(
+                                        sender.clone(),
+                                        cancellation.clone(),
+                                        requests,
+                                    ))
+                                }
+                                Ok(_) => app.status =
+                                    "No watched repositories to refresh. b returns to repositories"
+                                        .into(),
+                                Err(error) => app.status = error.to_string(),
+                            }
+                        }
                         Ok(Action::OpenIssue(url)) => {
                             if is_demo {
                                 app.status =

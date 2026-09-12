@@ -21,9 +21,19 @@ pub enum View {
     Repositories,
     Issues,
     Focuses,
+    Activity,
 }
 
 pub struct App {
+    pub activities: Vec<crate::activity::Activity>,
+    pub feeds: Vec<crate::sync::FeedState>,
+    pub activity_pending: Vec<(u64, String)>,
+    pub now: i64,
+    pub next_refresh: i64,
+    pub auto_paused: bool,
+    pub network_retry_at: Option<i64>,
+    pub unread_only: bool,
+    pub feed_details: bool,
     pub view: View,
     pub issues: HashMap<u64, Vec<crate::issues::Issue>>,
     pub issue_status: HashMap<u64, String>,
@@ -52,11 +62,22 @@ pub enum Action {
     Refresh,
     FetchIssues,
     OpenIssue(String),
+    FetchActivity,
+    FetchReviews(u64, u64),
 }
 
 impl App {
     pub fn new(store: Store, demo: bool) -> Self {
         Self {
+            activities: vec![],
+            feeds: vec![],
+            activity_pending: vec![],
+            now: chrono::Utc::now().timestamp(),
+            next_refresh: 0,
+            auto_paused: false,
+            network_retry_at: None,
+            unread_only: false,
+            feed_details: false,
             view: View::Repositories,
             issues: HashMap::new(),
             issue_status: HashMap::new(),
@@ -122,6 +143,7 @@ impl App {
             View::Repositories => self.visible().len(),
             View::Issues => self.visible_issues().len(),
             View::Focuses => self.focuses.len(),
+            View::Activity => self.visible_activity().len(),
         }
     }
     pub fn apply_issues(
@@ -180,6 +202,11 @@ impl App {
     }
     pub fn identify(&mut self, account: Account) -> Result<()> {
         if self.account.as_ref().map(|a| a.id) != Some(account.id) {
+            self.activities.clear();
+            self.feeds.clear();
+            self.activity_pending.clear();
+            self.auto_paused = false;
+            self.next_refresh = 0;
             self.issues.clear();
             self.issue_status.clear();
             self.focuses.clear();
@@ -196,6 +223,7 @@ impl App {
         self.focuses = self.store.focuses(id)?;
         self.repositories = self.store.repositories(id)?;
         self.load_tags()?;
+        self.load_activity()?;
         self.status = "Refreshing watched repositories (cached data may be stale)...".into();
         Ok(())
     }
@@ -212,6 +240,8 @@ impl App {
     }
     pub fn apply(&mut self, snapshot: Snapshot) -> Result<()> {
         if self.account.as_ref().map(|a| a.id) != Some(snapshot.account.id) {
+            self.activities.clear();
+            self.feeds.clear();
             self.issues.clear();
             self.issue_status.clear();
             self.focuses.clear();
@@ -316,8 +346,66 @@ impl App {
         }
         match key.code {
             KeyCode::Char('q') => return Ok(Action::Quit),
+            KeyCode::Char('d') => {
+                self.feed_details = false;
+                self.view = View::Activity;
+                self.selected = 0;
+                self.detail = false;
+                self.detail_scroll = 0;
+            }
+            KeyCode::Char('a') if self.view == View::Activity => {
+                if let (Some(account), Some(event)) = (&self.account, self.current_activity()) {
+                    let (account_id, repo_id, key, acknowledged) = (
+                        account.id,
+                        event.repo_id,
+                        event.key.clone(),
+                        !event.acknowledged,
+                    );
+                    self.store
+                        .acknowledge(account_id, repo_id, &key, acknowledged)?;
+                    self.load_activity()?;
+                    self.selected = self.selected.min(self.list_len().saturating_sub(1));
+                    self.status = if acknowledged {
+                        "Acknowledged locally; refresh never changes read state"
+                    } else {
+                        "Marked unread locally"
+                    }
+                    .into();
+                }
+            }
+            KeyCode::Char('u') if self.view == View::Activity => {
+                self.unread_only = !self.unread_only;
+                self.selected = 0;
+            }
+            KeyCode::Char('e') if self.view == View::Activity => {
+                self.feed_details = !self.feed_details;
+                self.detail_scroll = 0;
+            }
+            KeyCode::Char('v') if self.view == View::Activity => {
+                if let Some(event) = self.current_activity() {
+                    if matches!(
+                        event.kind,
+                        crate::activity::ActivityKind::PrChange
+                            | crate::activity::ActivityKind::Review
+                    ) {
+                        return Ok(Action::FetchReviews(event.repo_id, event.number));
+                    }
+                    self.status = "Select a PR change or review to fetch reviews".into();
+                }
+            }
+            KeyCode::Char('o') if self.view == View::Activity => {
+                if let Some(event) = self.current_activity() {
+                    anyhow::ensure!(
+                        crate::activity::valid_activity_url(&event.url),
+                        "Invalid GitHub activity URL"
+                    );
+                    return Ok(Action::OpenIssue(event.url.clone()));
+                }
+            }
             KeyCode::Char('r') => {
-                return Ok(if self.view == View::Issues {
+                return Ok(if self.view == View::Activity {
+                    Action::FetchActivity
+                } else if self.view == View::Issues {
                     Action::FetchIssues
                 } else {
                     Action::Refresh
@@ -339,7 +427,7 @@ impl App {
                 self.selected = 0;
                 self.detail = false;
             }
-            KeyCode::Char('s') if self.view != View::Focuses => {
+            KeyCode::Char('s') if matches!(self.view, View::Repositories | View::Issues) => {
                 self.mode = Mode::SaveFocus;
                 self.input.clear();
             }
@@ -375,7 +463,7 @@ impl App {
                 self.selected = self.selected.saturating_sub(1);
                 self.detail_scroll = 0;
             }
-            KeyCode::Char('/') if self.view != View::Focuses => {
+            KeyCode::Char('/') if matches!(self.view, View::Repositories | View::Issues) => {
                 self.input = if self.view == View::Issues {
                     self.issue_query.clone()
                 } else {
@@ -440,4 +528,160 @@ pub(crate) fn query_words(query: &str) -> Vec<String> {
         words.push(word);
     }
     words
+}
+
+impl App {
+    pub fn load_activity(&mut self) -> Result<()> {
+        if let Some(account) = &self.account {
+            self.activities = self.store.activities(account.id)?;
+            self.feeds = self.store.feeds(account.id)?;
+        }
+        Ok(())
+    }
+    pub fn visible_activity(&self) -> Vec<&crate::activity::Activity> {
+        let ids: std::collections::HashSet<_> = self
+            .visible()
+            .into_iter()
+            .map(|i| self.repositories[i].id)
+            .collect();
+        let mut events: Vec<_> = self
+            .activities
+            .iter()
+            .filter(|event| {
+                ids.contains(&event.repo_id)
+                    && event.occurred_at <= self.now
+                    && (crate::activity::is_today(event.occurred_at, self.now, &chrono::Local)
+                        || !event.acknowledged)
+                    && (!self.unread_only || !event.acknowledged)
+            })
+            .collect();
+        events.sort_by_key(|event| {
+            (
+                !crate::activity::is_today(event.occurred_at, self.now, &chrono::Local),
+                std::cmp::Reverse(event.occurred_at),
+                event.repo_id,
+                &event.key,
+            )
+        });
+        events
+    }
+    pub fn current_activity(&self) -> Option<&crate::activity::Activity> {
+        self.visible_activity().get(self.selected).copied()
+    }
+    pub fn auto_due(&self) -> bool {
+        !self.demo
+            && !self.busy
+            && self.account.is_some()
+            && !self.auto_paused
+            && self.network_retry_at.is_none_or(|at| self.now >= at)
+            && self.now >= self.next_refresh
+            && !self.feeds.iter().any(|f| {
+                self.repositories.iter().any(|r| r.id == f.repo_id)
+                    && (f.paused || f.retry_at.is_some_and(|at| self.now < at))
+            })
+    }
+    pub fn prepare_activity(
+        &mut self,
+        manual: bool,
+        review: Option<(u64, u64)>,
+    ) -> Result<Vec<crate::sync::FeedRequest>> {
+        self.check_network_window()?;
+        anyhow::ensure!(
+            !self.busy,
+            "Another refresh is running; retry when it finishes"
+        );
+        let account = self
+            .account
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("Connect first: b then r"))?;
+        let mut requests = Vec::new();
+        for repo in &self.repositories {
+            let names = match review {
+                Some((id, number)) if repo.id == id => vec![format!("reviews:{number}")],
+                Some(_) => continue,
+                None => vec!["issues".into(), "comments".into()],
+            };
+            for feed in names {
+                let state = self
+                    .store
+                    .ensure_feed(account.id, repo.id, &feed, self.now)?;
+                if state.ready(self.now, manual) {
+                    requests.push(crate::sync::FeedRequest {
+                        account: account.clone(),
+                        repo: repo.clone(),
+                        state,
+                        upper: self.now,
+                    });
+                }
+            }
+        }
+        self.load_activity()?;
+        self.next_refresh = self.now.saturating_add(crate::sync::REFRESH_SECONDS);
+        self.auto_paused = false;
+        self.activity_pending = requests
+            .iter()
+            .map(|r| (r.repo.id, r.state.feed.clone()))
+            .collect();
+        self.busy = !requests.is_empty();
+        self.status = "Loading activity; first sync covers the last 24 hours, later syncs catch up from saved checkpoints".into();
+        Ok(requests)
+    }
+    pub fn apply_activity(
+        &mut self,
+        request: &crate::sync::FeedRequest,
+        result: Result<Vec<crate::activity::Activity>>,
+    ) -> Result<()> {
+        if self.account.as_ref().map(|a| a.id) != Some(request.account.id) {
+            return Ok(());
+        }
+        let selected = if self.view == View::Activity {
+            self.current_activity().map(|a| (a.repo_id, a.key.clone()))
+        } else {
+            None
+        };
+        self.activity_pending
+            .retain(|(id, feed)| *id != request.repo.id || *feed != request.state.feed);
+        let result = result.and_then(|events| self.store.commit_activity(request, &events));
+        if let Err(error) = result {
+            self.observe_failure(&error);
+            self.store.fail_activity(request, &error)?;
+            self.status = format!("Activity incomplete: {error}");
+        }
+        self.load_activity()?;
+        if let Some((repo, key)) = selected {
+            if let Some(index) = self
+                .visible_activity()
+                .iter()
+                .position(|a| a.repo_id == repo && a.key == key)
+            {
+                self.selected = index;
+            }
+        }
+        self.selected = self.selected.min(self.list_len().saturating_sub(1));
+        Ok(())
+    }
+
+    pub fn observe_failure(&mut self, error: &anyhow::Error) {
+        if let Some(policy) = error.downcast_ref::<crate::sync::RequestFailure>() {
+            self.auto_paused |= policy.paused;
+            if let Some(at) = policy.retry_at {
+                self.network_retry_at = Some(self.network_retry_at.unwrap_or(at).max(at));
+            }
+        }
+    }
+    pub fn check_network_window(&self) -> Result<()> {
+        let retry_at = self
+            .feeds
+            .iter()
+            .filter_map(|f| f.retry_at)
+            .chain(self.network_retry_at)
+            .max();
+        if let Some(at) = retry_at.filter(|at| *at > self.now) {
+            anyhow::bail!(
+                "GitHub rate limit; retry after {}",
+                crate::activity::iso(at)?
+            );
+        }
+        Ok(())
+    }
 }
