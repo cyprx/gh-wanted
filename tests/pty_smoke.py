@@ -107,6 +107,9 @@ try:
     issue_view = send("i")
     assert b"Improve keyboard navigation" in issue_view, issue_view
     capture("issues")
+    assert b"Esc list" in send("\r")
+    send("j")
+    send("\x1b")
     send("/")
     send('label:"good first issue" unassigned\r')
     send("s")

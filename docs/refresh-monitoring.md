@@ -13,6 +13,10 @@ report is empty after a normal refresh, check write access to the printed path.
 
 ## What is recorded
 
+Issue runs record `issue_window` events with the repository ID, window length and
+UTC cutoff. Summaries expose `issue_window_days`; compare runs with the same
+window. The default is seven days, with `days:30` available in the Issues filter.
+
 - Run ID, refresh kind, UTC timestamps, monotonic elapsed time, start and close.
 - Operation start/end, numeric repository ID, activity feed, duration, result
   count and success/failure. Activity windows distinguish initial from incremental

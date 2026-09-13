@@ -116,6 +116,21 @@ Refresh runs in the background, with one refresh at a time and up to three feed 
 
 ## Development checks
 
+In Issues, Enter focuses Details and Esc returns to List. The active pane has an
+accent border. List uses `j/k` to select issues; Details uses `j/k` to scroll and
+PgUp/PgDn to move a viewport. Tab toggles expanded details, and `o` opens the issue
+in a browser. Narrow terminals show Details full-width when focused. Descriptions
+support basic Markdown headings, lists, quotes, and fenced code blocks, with
+wrapped text and scrolling bounded to the rendered content.
+
+Issue discovery defaults to issues updated within the last seven days. In Issues,
+press `/` and add `days:30` for the last 30 days, or `days:7` to switch back.
+Changing the window requests a refresh; if another refresh is running, press `r`
+after it finishes. Saved focuses preserve this filter; older focuses default to
+seven days. The window is applied on GitHub before pagination. Very busy windows
+can still exceed the 16 MiB limit; failed refreshes preserve cached results and
+remain marked incomplete. Today/catch-up checkpoints are unaffected.
+
 The app opens on Today with cached activity after account verification. Tabs are
 ordered Today, Issues, Repos, Focuses; existing `d`, `i`, `b`, and `f` shortcuts
 are unchanged. Background account loading preserves the tab you have selected.

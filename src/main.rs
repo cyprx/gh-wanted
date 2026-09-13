@@ -21,7 +21,7 @@ use std::{
 enum Update {
     Account(Account),
     Done(Result<Snapshot>),
-    Issues(u64, u64, Result<Vec<gh_wanted::issues::Issue>>),
+    Issues(u64, u64, u16, Result<Vec<gh_wanted::issues::Issue>>),
     IssuesDone,
     Activity(
         gh_wanted::sync::FeedRequest,
@@ -140,11 +140,15 @@ fn start_issues(
     cancellation: Arc<AtomicBool>,
     account: Account,
     repos: Vec<Repository>,
+    days: u16,
+    now: i64,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let client = refresh_client(cancellation.clone(), "issues");
         client.record_refresh_plan("manual", Some(account.id), repos.len());
-        let client = client.bind(Some(&account));
+        let client = client
+            .with_issue_window(days, now)
+            .and_then(|client| client.bind(Some(&account)));
         gh_wanted::sync::run_bounded(
             repos,
             &cancellation,
@@ -160,7 +164,7 @@ fn start_issues(
             },
             |repo, result| {
                 sender
-                    .send(Update::Issues(account.id, repo.id, result))
+                    .send(Update::Issues(account.id, repo.id, days, result))
                     .is_ok()
             },
         );
@@ -169,11 +173,12 @@ fn start_issues(
 }
 
 fn demo_issues(app: &mut App, repos: &[Repository]) {
+    let current_date = chrono::Utc::now().to_rfc3339();
     for repo in repos {
         app.apply_issues(1, repo.id, Ok(vec![gh_wanted::issues::Issue {
             repo_id: repo.id, number: 1, title: "Improve keyboard navigation".into(),
             body: Some("Help new contributors navigate the list with the keyboard.\n\nAdd a regression test for moving through an empty list, and document the shortcuts.".into()),
-            state: "open".into(), created_at: "2026-09-10T09:00:00Z".into(), updated_at: "2026-09-11T09:00:00Z".into(),
+            state: "open".into(), created_at: current_date.clone(), updated_at: current_date.clone(),
             labels: vec!["good first issue".into(), "enhancement".into()], assignees: vec![],
             url: format!("https://github.com/{}/issues/1", repo.full_name),
         }]));
@@ -285,11 +290,11 @@ fn updates(app: &mut App, receiver: &Receiver<Update>) {
                 }
                 Ok(())
             }
-            Update::Issues(account, repo, result) => {
+            Update::Issues(account, repo, days, result) => {
                 if let Err(error) = &result {
                     app.observe_failure(error);
                 }
-                app.apply_issues(account, repo, result);
+                app.apply_issues_for_window(account, repo, days, result);
                 Ok(())
             }
             Update::IssuesDone => {
@@ -456,6 +461,8 @@ fn run() -> Result<()> {
                                         cancellation.clone(),
                                         account,
                                         repos,
+                                        app.issue_window_days(),
+                                        app.now,
                                     ));
                                 }
                             } else {

@@ -52,6 +52,52 @@ fn body_lines(body: &str) -> Vec<Line<'static>> {
     body.lines().map(|line| Line::from(clean(line))).collect()
 }
 
+/// Basic block Markdown. Code is displayed as text, never interpreted as terminal escapes.
+fn markdown_lines(body: &str) -> Vec<Line<'static>> {
+    let mut fence: Option<char> = None;
+    body.lines()
+        .map(|raw| {
+            let text = clean(&raw.replace('\t', "    "));
+            let trimmed = text.trim_start();
+            if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+                let marker = trimmed.chars().next().unwrap();
+                if fence.is_none() {
+                    fence = Some(marker);
+                    return metadata(format!("Code  {}", &trimmed[3..]));
+                } else if fence == Some(marker) {
+                    fence = None;
+                    return Line::from("");
+                }
+            }
+            if fence.is_some() {
+                return Line::styled(
+                    format!("  {text}"),
+                    Style::default().fg(TOPIC).bg(BACKGROUND),
+                );
+            }
+            let hashes = trimmed.bytes().take_while(|c| *c == b'#').count();
+            if (1..=6).contains(&hashes) && trimmed.as_bytes().get(hashes) == Some(&b' ') {
+                return heading(trimmed[hashes + 1..].to_owned());
+            }
+            if let Some(quote) = trimmed.strip_prefix('>') {
+                return Line::styled(
+                    format!("│ {}", quote.trim_start()),
+                    Style::default().fg(MUTED).add_modifier(Modifier::ITALIC),
+                );
+            }
+            for prefix in ["- ", "* ", "+ "] {
+                if let Some(item) = trimmed.strip_prefix(prefix) {
+                    return Line::from(format!(
+                        "{}• {item}",
+                        " ".repeat(text.len() - trimmed.len())
+                    ));
+                }
+            }
+            Line::from(text)
+        })
+        .collect()
+}
+
 fn panes(area: Rect, detail: bool) -> Vec<Rect> {
     if area.width >= 88 && !detail {
         let columns = Layout::horizontal([
@@ -131,8 +177,16 @@ fn draw_shortcuts(frame: &mut Frame, app: &App, area: Rect) {
             ("i", "issues"),
             ("s", "save focus"),
         ],
+        View::Issues if app.issue_pane == Pane::Details => vec![
+            ("j/k", "scroll"),
+            ("PgUp/Dn", "page"),
+            ("Esc", "list"),
+            ("o", "open"),
+            ("Tab", "expand"),
+        ],
         View::Issues => vec![
             ("j/k", "move"),
+            ("Enter", "details"),
             ("/", "filter"),
             ("Tab", "details"),
             ("o", "open"),
@@ -342,7 +396,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
             "Enter opens a focus with its saved filters",
         ),
         Mode::IssueSearch => (
-            " Issue filter • Enter applies • Esc cancels ",
+            " Issue filter • days:7 or days:30 • Enter applies ",
             app.input.as_str(),
         ),
         Mode::SaveFocus => (
@@ -510,7 +564,8 @@ fn draw_discovery(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     frame.render_widget(
         Paragraph::new(vec![
             heading(format!(
-                "Issue discovery  /  {}/{} repositories loaded{}",
+                "Updated in last {} days  /  {}/{} repositories loaded{}",
+                app.issue_window_days(),
                 complete,
                 visible.len(),
                 if complete < visible.len() {
@@ -532,17 +587,21 @@ fn draw_discovery(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         .wrap(Wrap { trim: true }),
         rows[0],
     );
-    let columns = panes(rows[1], app.detail);
+    let details_only = app.detail || (rows[1].width < 88 && app.issue_pane == Pane::Details);
+    let columns = panes(rows[1], details_only);
     let issues = app.visible_issues();
-    if !app.detail {
-        let block = panel(format!(" Issues ({}) ", issues.len()), false);
+    if !details_only {
+        let block = panel(
+            format!(" Issues ({}) ", issues.len()),
+            app.issue_pane == Pane::List,
+        );
         if issues.is_empty() {
             let text = if visible.is_empty() {
                 "No repositories match. Press b and change the repository filter with /."
             } else if complete < visible.len() {
                 "Issue results are incomplete. Wait for loading, or press r to retry. b returns to repositories."
             } else {
-                "No issues match. Press / to change labels, keywords, state, or unassigned. Default state is open."
+                "No recent issues match. Press / and use days:30 for a wider window, or change labels, keywords, state, or unassigned. Default: days:7 state:open."
             };
             frame.render_widget(
                 Paragraph::new(text).wrap(Wrap { trim: true }).block(block),
@@ -583,12 +642,19 @@ fn draw_discovery(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             );
         }
     }
-    if app.detail || columns.len() > 1 {
+    if details_only || columns.len() > 1 {
         let body = app
             .current_issue()
             .map(|i| {
                 let mut lines = vec![
                     heading(clean(&i.title)),
+                    metadata(
+                        app.repositories
+                            .iter()
+                            .find(|r| r.id == i.repo_id)
+                            .map(|r| clean(&r.full_name))
+                            .unwrap_or_default(),
+                    ),
                     metadata(format!(
                         "#{}  •  {}  •  {}",
                         i.number,
@@ -600,28 +666,35 @@ fn draw_discovery(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                         }
                     )),
                     Line::styled(clean(&i.labels.join("  /  ")), Style::default().fg(TOPIC)),
-                    Line::from(""),
-                ];
-                lines.extend(body_lines(
-                    i.body.as_deref().unwrap_or("No description provided."),
-                ));
-                lines.extend([
-                    Line::from(""),
                     metadata(format!("Created  {}", clean(&i.created_at))),
                     metadata(format!("Updated  {}", clean(&i.updated_at))),
                     Line::from(""),
-                    metadata(clean(&i.url)),
-                ]);
+                ];
+                lines.extend(markdown_lines(
+                    i.body.as_deref().unwrap_or("No description provided."),
+                ));
+                lines.extend([Line::from(""), metadata(clean(&i.url))]);
                 lines
             })
             .unwrap_or_else(|| vec![metadata("Select an issue to read its description.")]);
-        frame.render_widget(
-            Paragraph::new(body)
-                .wrap(Wrap { trim: false })
-                .scroll((app.detail_scroll, 0))
-                .block(panel(" Issue details ", false)),
-            *columns.last().unwrap(),
-        );
+        let identity = app.current_issue().map(|i| (i.repo_id, i.number));
+        if app.issue_rendered.replace(identity) != identity {
+            app.issue_scroll.set(0);
+        }
+        let area = *columns.last().unwrap();
+        let block = panel(" Issue details ", app.issue_pane == Pane::Details);
+        let inner = block.inner(area);
+        let paragraph = Paragraph::new(body).wrap(Wrap { trim: false });
+        let max_scroll = paragraph
+            .line_count(inner.width)
+            .saturating_sub(usize::from(inner.height))
+            .min(usize::from(u16::MAX)) as u16;
+        // Cache layout-derived bounds for the next key event, and clamp after resizing.
+        app.issue_scroll_max.set(max_scroll);
+        app.issue_page_height.set(inner.height.max(1));
+        let scroll = app.issue_scroll.get().min(max_scroll);
+        app.issue_scroll.set(scroll);
+        frame.render_widget(paragraph.scroll((scroll, 0)).block(block), area);
     }
 }
 

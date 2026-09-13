@@ -26,6 +26,7 @@ pub struct Snapshot {
 }
 
 pub struct GhClient {
+    issue_window: (u16, i64),
     token: Option<OsString>,
     bound_account: Option<Account>,
     failure: Mutex<Option<crate::sync::RequestFailure>>,
@@ -44,6 +45,7 @@ impl Default for GhClient {
 impl GhClient {
     pub fn new(program: impl Into<OsString>, timeout: Duration) -> Self {
         Self {
+            issue_window: (7, chrono::Utc::now().timestamp()),
             token: None,
             bound_account: None,
             failure: Mutex::new(None),
@@ -57,6 +59,12 @@ impl GhClient {
     pub fn with_cancellation(mut self, cancellation: Arc<AtomicBool>) -> Self {
         self.cancellation = cancellation;
         self
+    }
+
+    pub fn with_issue_window(mut self, days: u16, now: i64) -> Result<Self> {
+        anyhow::ensure!(matches!(days, 7 | 30), "Issue window must be 7 or 30 days");
+        self.issue_window = (days, now);
+        Ok(self)
     }
 
     pub fn with_metrics(mut self, path: std::path::PathBuf, kind: &str) -> Self {
@@ -176,6 +184,9 @@ impl GhClient {
         account: &Account,
         repo: &Repository,
     ) -> Result<Vec<crate::issues::Issue>> {
+        if let Some(metrics) = &self.metrics {
+            metrics.record(serde_json::json!({"event":"issue_window", "repo_id":repo.id, "days":self.issue_window.0, "lower":self.issue_window.1.saturating_sub(i64::from(self.issue_window.0)*86400)}));
+        }
         match &self.metrics {
             Some(metrics) => metrics.operation(
                 "issues",
@@ -201,8 +212,13 @@ impl GhClient {
             self.account()? == *account,
             "GitHub account changed; refresh repositories"
         );
+        let since = crate::activity::iso(
+            self.issue_window
+                .1
+                .saturating_sub(i64::from(self.issue_window.0) * 86400),
+        )?;
         let endpoint = format!(
-            "repos/{}/issues?state=all&sort=updated&direction=desc&per_page=100",
+            "repos/{}/issues?state=all&sort=updated&direction=desc&per_page=100&since={since}",
             repo.full_name
         );
         let bytes = if self.bound_account.is_some() {
@@ -215,7 +231,7 @@ impl GhClient {
                 total += response.len();
                 anyhow::ensure!(
                     total <= OUTPUT_LIMIT,
-                    "GitHub CLI output exceeded the 16 MiB limit"
+                    "Issue window exceeded the 16 MiB limit; cached results retained. Try days:7 if using days:30"
                 );
                 let (headers, body) = split_response(&response)?;
                 let records: Vec<serde_json::Value> = serde_json::from_slice(body)

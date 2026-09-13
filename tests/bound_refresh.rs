@@ -93,6 +93,49 @@ fn shared_rate_failure_prevents_subsequent_dispatch() {
 }
 
 #[test]
+fn issue_window_is_sent_on_every_page_and_failed_page_is_not_complete() {
+    for (days, since) in [(7, "2026-09-06T12:00:00Z"), (30, "2026-08-14T12:00:00Z")] {
+        let script = format!(
+            r#"
+if [ "$1" = auth ]; then printf '%s' synthetic-test-credential; exit 0; fi
+if [ "$4" = user ]; then printf '%s' '{{"id":7,"login":"alice"}}'; exit 0; fi
+[ "$5" = --include ] || exit 8
+case "$4" in
+  'repos/demo/repo1/issues?state=all&sort=updated&direction=desc&per_page=100&since={since}&page=1')
+    printf 'HTTP/2.0 200 OK\r\nLink: <unused>; rel="next"\r\n\r\n[]' ;;
+  'repos/demo/repo1/issues?state=all&sort=updated&direction=desc&per_page=100&since={since}&page=2')
+    printf 'HTTP/2.0 200 OK\r\n\r\n[]' ;;
+  *) exit 9 ;;
+esac
+"#
+        );
+        let (dir, client) = fake(&script);
+        let metrics = dir.path().join("metrics.jsonl");
+        let now = gh_wanted::activity::timestamp("2026-09-13T12:00:00Z").unwrap();
+        let client = client
+            .with_metrics(metrics.clone(), "issues")
+            .with_issue_window(days, now)
+            .unwrap()
+            .bind(Some(&account()))
+            .unwrap();
+        assert!(client.issues(&account(), &repo(1)).unwrap().is_empty());
+        let log = fs::read_to_string(metrics).unwrap();
+        assert!(log
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .any(|v| v["event"] == "issue_window" && v["days"] == days));
+        let failed = script.replace("printf 'HTTP/2.0 200 OK\\r\\n\\r\\n[]'", "exit 1");
+        let (_dir, client) = fake(&failed);
+        let client = client
+            .with_issue_window(days, now)
+            .unwrap()
+            .bind(Some(&account()))
+            .unwrap();
+        assert!(client.issues(&account(), &repo(1)).is_err());
+    }
+}
+
+#[test]
 fn bound_concurrent_refresh_reduces_calls_in_controlled_baseline() {
     let (old_dir, old) = fake(SCRIPT);
     let start = Instant::now();

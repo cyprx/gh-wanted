@@ -173,6 +173,7 @@ pub fn report(path: &Path) -> anyhow::Result<String> {
             let summary = runs.entry(id.into()).or_insert_with(|| json!({"run":id,"kind":v["kind"],"closed":false,"cli_calls":0,"observed_pages":0,"failed_calls":0,"account_calls":0,"operations":0,"items_returned":0}));
             summary["elapsed_ms"] = v["elapsed_ms"].clone();
             match v["event"].as_str() {
+                Some("issue_window") => summary["issue_window_days"] = v["days"].clone(),
                 Some("account_bound") => {
                     summary["account_bound"] = json!(true);
                     summary["account_id"] = v["account_id"].clone();

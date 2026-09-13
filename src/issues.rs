@@ -17,6 +17,7 @@ pub struct Issue {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IssueFilter {
+    pub days: u16,
     pub labels: Vec<String>,
     pub keyword: String,
     pub state: String,
@@ -30,6 +31,7 @@ impl IssueFilter {
             "Close the quoted filter value"
         );
         let mut filter = Self {
+            days: 7,
             labels: vec![],
             keyword: String::new(),
             state: "open".into(),
@@ -37,7 +39,13 @@ impl IssueFilter {
         };
         let mut keywords = Vec::new();
         for word in crate::app::query_words(query) {
-            if let Some(label) = word.strip_prefix("label:") {
+            if let Some(days) = word.strip_prefix("days:") {
+                ensure!(
+                    matches!(days, "7" | "30"),
+                    "Issue window must be days:7 or days:30"
+                );
+                filter.days = days.parse()?;
+            } else if let Some(label) = word.strip_prefix("label:") {
                 ensure!(!label.is_empty(), "Provide a label after label:");
                 filter.labels.push(label.to_lowercase());
             } else if let Some(state) = word.strip_prefix("state:") {

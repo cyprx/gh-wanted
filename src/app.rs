@@ -42,6 +42,11 @@ pub struct App {
     pub feed_details: bool,
     pub view: View,
     pub pane: Pane,
+    pub issue_pane: Pane,
+    pub issue_scroll: std::cell::Cell<u16>,
+    pub issue_scroll_max: std::cell::Cell<u16>,
+    pub issue_page_height: std::cell::Cell<u16>,
+    pub issue_rendered: std::cell::Cell<Option<(u64, u64)>>,
     pub issues: HashMap<u64, Vec<crate::issues::Issue>>,
     pub issue_status: HashMap<u64, String>,
     pub issue_query: String,
@@ -88,6 +93,11 @@ impl App {
             feed_details: false,
             view: View::Activity,
             pane: Pane::List,
+            issue_pane: Pane::List,
+            issue_scroll: std::cell::Cell::new(0),
+            issue_scroll_max: std::cell::Cell::new(0),
+            issue_page_height: std::cell::Cell::new(1),
+            issue_rendered: std::cell::Cell::new(None),
             issues: HashMap::new(),
             issue_status: HashMap::new(),
             issue_query: String::new(),
@@ -135,6 +145,11 @@ impl App {
             .filter_map(|i| self.issues.get(&self.repositories[i].id))
             .flatten()
             .filter(|issue| filter.matches(issue))
+            .filter(|issue| {
+                chrono::DateTime::parse_from_rfc3339(&issue.updated_at).map_or(true, |at| {
+                    at.timestamp() >= self.now.saturating_sub(i64::from(filter.days) * 86400)
+                })
+            })
             .collect();
         issues.sort_by(|a, b| {
             b.updated_at
@@ -146,6 +161,22 @@ impl App {
     }
     pub fn current_issue(&self) -> Option<&crate::issues::Issue> {
         self.visible_issues().get(self.selected).copied()
+    }
+
+    pub fn issue_window_days(&self) -> u16 {
+        crate::issues::IssueFilter::parse(&self.issue_query).map_or(7, |filter| filter.days)
+    }
+
+    pub fn apply_issues_for_window(
+        &mut self,
+        account: u64,
+        repo: u64,
+        days: u16,
+        result: Result<Vec<crate::issues::Issue>>,
+    ) {
+        if days == self.issue_window_days() {
+            self.apply_issues(account, repo, result);
+        }
     }
     fn list_len(&self) -> usize {
         match self.view {
@@ -341,10 +372,17 @@ impl App {
                     self.query = self.input.trim().to_owned();
                     self.selected = 0;
                 } else if self.mode == Mode::IssueSearch {
-                    crate::issues::IssueFilter::parse(&self.input)?;
+                    let window = crate::issues::IssueFilter::parse(&self.input)?.days;
+                    let changed_window = window != self.issue_window_days();
                     self.issue_query = self.input.trim().to_owned();
                     self.selected = 0;
                     self.detail_scroll = 0;
+                    if changed_window {
+                        self.issue_status.clear();
+                        self.mode = Mode::Browse;
+                        self.input.clear();
+                        return Ok(Action::FetchIssues);
+                    }
                 } else if self.mode == Mode::SaveFocus {
                     let account = self
                         .account
@@ -398,10 +436,14 @@ impl App {
             }
             KeyCode::Char('b') => self.switch_view(View::Repositories),
             KeyCode::Char('f') => self.switch_view(View::Focuses),
-            KeyCode::PageDown => self.detail_scroll = self.detail_scroll.saturating_add(10),
-            KeyCode::PageUp => self.detail_scroll = self.detail_scroll.saturating_sub(10),
+            KeyCode::PageDown if self.view != View::Issues => {
+                self.detail_scroll = self.detail_scroll.saturating_add(10)
+            }
+            KeyCode::PageUp if self.view != View::Issues => {
+                self.detail_scroll = self.detail_scroll.saturating_sub(10)
+            }
             KeyCode::Char('?') => self.help = true,
-            KeyCode::Tab => self.detail = !self.detail,
+            KeyCode::Tab if self.view != View::Issues => self.detail = !self.detail,
             _ => return None,
         }
         Some(Action::None)
@@ -411,6 +453,8 @@ impl App {
         self.view = view;
         self.selected = 0;
         self.detail = false;
+        self.issue_pane = Pane::List;
+        self.issue_scroll.set(0);
     }
 
     fn handle_repo_key(&mut self, code: KeyCode) -> Result<Action> {
@@ -475,6 +519,11 @@ impl App {
 
     fn handle_issue_key(&mut self, code: KeyCode) -> Result<Action> {
         match code {
+            KeyCode::Enter if self.current_issue().is_some() => self.issue_pane = Pane::Details,
+            KeyCode::Tab if self.current_issue().is_some() => {
+                self.detail = !self.detail;
+                self.issue_pane = Pane::Details;
+            }
             KeyCode::Char('r') => return Ok(Action::FetchIssues),
             KeyCode::Char('s') => self.start_editor(Mode::SaveFocus, String::new()),
             KeyCode::Char('/') => self.start_editor(Mode::IssueSearch, self.issue_query.clone()),
@@ -487,9 +536,44 @@ impl App {
                     return Ok(Action::OpenIssue(issue.url.clone()));
                 }
             }
+            KeyCode::Esc if self.issue_pane == Pane::Details => {
+                self.issue_pane = Pane::List;
+                self.detail = false;
+            }
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::PageDown
+                if self.issue_pane == Pane::Details =>
+            {
+                let step = if code == KeyCode::PageDown {
+                    self.issue_page_height.get()
+                } else {
+                    1
+                };
+                self.issue_scroll.set(
+                    self.issue_scroll
+                        .get()
+                        .saturating_add(step)
+                        .min(self.issue_scroll_max.get()),
+                );
+            }
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::PageUp
+                if self.issue_pane == Pane::Details =>
+            {
+                let step = if code == KeyCode::PageUp {
+                    self.issue_page_height.get()
+                } else {
+                    1
+                };
+                self.issue_scroll
+                    .set(self.issue_scroll.get().saturating_sub(step));
+            }
             KeyCode::Esc => {
+                let changed_window = self.issue_window_days() != 7;
                 self.issue_query.clear();
                 self.selected = 0;
+                if changed_window {
+                    self.issue_status.clear();
+                    return Ok(Action::FetchIssues);
+                }
             }
             _ => self.handle_list_key(code),
         }
@@ -501,6 +585,11 @@ impl App {
             KeyCode::Char('r') => return Ok(Action::Refresh),
             KeyCode::Enter => {
                 if let Some(focus) = self.focuses.get(self.selected) {
+                    if crate::issues::IssueFilter::parse(&focus.issue_query)?.days
+                        != self.issue_window_days()
+                    {
+                        self.issue_status.clear();
+                    }
                     self.query = focus.repository_query.clone();
                     self.issue_query = focus.issue_query.clone();
                     self.view = View::Issues;
@@ -584,10 +673,12 @@ impl App {
     fn handle_list_key(&mut self, code: KeyCode) {
         match code {
             KeyCode::Down | KeyCode::Char('j') => {
+                self.issue_scroll.set(0);
                 self.selected = (self.selected + 1).min(self.list_len().saturating_sub(1));
                 self.detail_scroll = 0;
             }
             KeyCode::Up | KeyCode::Char('k') => {
+                self.issue_scroll.set(0);
                 self.selected = self.selected.saturating_sub(1);
                 self.detail_scroll = 0;
             }

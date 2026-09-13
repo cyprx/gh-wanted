@@ -181,7 +181,8 @@ fn issue_fetch_has_explicit_parameters_and_rejects_failed_pages() {
 if [ "$4" = user ]; then
   printf '%s' '{"id":7,"login":"alice"}'
 else
-  [ "$4" = 'repos/demo/repo/issues?state=all&sort=updated&direction=desc&per_page=100' ] && [ "$5" = --paginate ] && [ "$6" = --slurp ] && [ "$#" = 6 ] || exit 5
+  case "$4" in 'repos/demo/repo/issues?state=all&sort=updated&direction=desc&per_page=100&since='*) ;; *) exit 5;; esac
+  [ "$5" = --paginate ] && [ "$6" = --slurp ] && [ "$#" = 6 ] || exit 5
   printf '%s' '[[]]'
 fi
 "#;
