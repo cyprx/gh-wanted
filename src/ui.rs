@@ -113,19 +113,12 @@ fn panes(area: Rect, detail: bool) -> Vec<Rect> {
 }
 
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
+    let show_logo = area.height >= 4;
     let rows = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
+        Constraint::Length(if show_logo { 3 } else { 2 }),
         Constraint::Length(1),
     ])
     .split(area);
-    let brand = Line::from(vec![
-        Span::styled(
-            " gh-wanted ",
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" / find where you're needed", Style::default().fg(MUTED)),
-    ]);
     let who = format!(
         "{}{}  ",
         app.account
@@ -139,7 +132,35 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         Constraint::Length(if area.width >= 80 { 28 } else { 15 }),
     ])
     .split(rows[0]);
-    frame.render_widget(Paragraph::new(brand), columns[0]);
+    if show_logo {
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(vec![
+                    Span::styled("█▀▀ █ █", Style::default().fg(Color::Rgb(152, 195, 121))),
+                    Span::raw("   "),
+                    Span::styled("█ █ █ ▄▀▄ █▄ █ ▀█▀ █▀▀ █▀▄", Style::default().fg(TOPIC)),
+                ]),
+                Line::from(vec![
+                    Span::styled("█ █ █▀█", Style::default().fg(Color::Rgb(152, 195, 121))),
+                    Span::raw("   "),
+                    Span::styled("█ █ █ █▀█ █ ▀█  █  █▀  █ █", Style::default().fg(TOPIC)),
+                ]),
+                Line::from(vec![
+                    Span::styled("▀▀▀ ▀ ▀", Style::default().fg(Color::Rgb(152, 195, 121))),
+                    Span::raw("   "),
+                    Span::styled("▀▀▀▀▀ ▀ ▀ ▀  ▀  ▀  ▀▀▀ ▀▀ ", Style::default().fg(TOPIC)),
+                ]),
+            ])
+            .style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            columns[0],
+        );
+    } else {
+        frame.render_widget(
+            Paragraph::new("GH Wanted")
+                .style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+            columns[0],
+        );
+    }
     frame.render_widget(
         Paragraph::new(who)
             .alignment(Alignment::Right)
@@ -165,7 +186,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         tabs.push(Span::styled(format!(" {key} {label} "), style));
         tabs.push(Span::raw(" "));
     }
-    frame.render_widget(Paragraph::new(Line::from(tabs)), rows[2]);
+    frame.render_widget(Paragraph::new(Line::from(tabs)), rows[1]);
 }
 
 fn draw_shortcuts(frame: &mut Frame, app: &App, area: Rect) {
@@ -235,7 +256,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
     let area = Rect::new(area.x + 1, area.y + 1, area.width - 2, area.height - 2);
     let rows = Layout::vertical([
-        Constraint::Length(3),
+        Constraint::Length(if area.width >= 70 && area.height >= 18 {
+            4
+        } else {
+            3
+        }),
         Constraint::Min(3),
         Constraint::Length(3),
         Constraint::Length(2),
