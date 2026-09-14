@@ -52,6 +52,8 @@ A terminal of **100 × 30** or larger is recommended. Compact layouts work from 
 
 The app opens on **Today**. After account verification it displays cached activity and refreshes in the background. Today includes read and unread items from your local calendar day; catch-up contains earlier unread activity. Press `a` to acknowledge an item. Opening it or refreshing does not mark it read.
 
+Press Enter to focus an activity's Details pane. Scroll with `j/k`, arrows, or PgUp/PgDn; Esc returns to the list. Descriptions render basic Markdown blocks, and `o` opens the activity in your browser. On narrow terminals, focused details use the full width. Press `e` for separate feed-status details and Esc to return.
+
 Press `b` to organize repositories. Add local tags with `t`, then filter with `/`:
 
 ```text
@@ -80,8 +82,8 @@ Press `s` to save your repository and issue filters as a named focus. Press `f`,
 | Key | Action |
 | --- | --- |
 | `d` / `i` / `b` / `f` | Today / Issues / Repos / Focuses |
-| `j/k` or arrows | Move through a list; scroll focused Issue Details |
-| Enter | Focus Repo/Issue Details, open a focus, or submit input |
+| `j/k` or arrows | Move through a list; scroll focused Issue/Today Details |
+| Enter | Focus Repo/Issue/Today Details, open a focus, or submit input |
 | Esc | Cancel input, leave focused Details, or clear the current filter |
 | Tab | Toggle expanded details |
 | PgUp / PgDn | Scroll details or feed status |

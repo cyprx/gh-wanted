@@ -47,6 +47,11 @@ pub struct App {
     pub issue_scroll_max: std::cell::Cell<u16>,
     pub issue_page_height: std::cell::Cell<u16>,
     pub issue_rendered: std::cell::Cell<Option<(u64, u64)>>,
+    pub activity_pane: Pane,
+    pub activity_scroll: std::cell::Cell<u16>,
+    pub activity_scroll_max: std::cell::Cell<u16>,
+    pub activity_page_height: std::cell::Cell<u16>,
+    pub activity_rendered: std::cell::RefCell<Option<(u64, String)>>,
     pub issues: HashMap<u64, Vec<crate::issues::Issue>>,
     pub issue_status: HashMap<u64, String>,
     pub issue_query: String,
@@ -94,6 +99,11 @@ impl App {
             view: View::Activity,
             pane: Pane::List,
             issue_pane: Pane::List,
+            activity_pane: Pane::List,
+            activity_scroll: std::cell::Cell::new(0),
+            activity_scroll_max: std::cell::Cell::new(0),
+            activity_page_height: std::cell::Cell::new(1),
+            activity_rendered: std::cell::RefCell::new(None),
             issue_scroll: std::cell::Cell::new(0),
             issue_scroll_max: std::cell::Cell::new(0),
             issue_page_height: std::cell::Cell::new(1),
@@ -436,14 +446,16 @@ impl App {
             }
             KeyCode::Char('b') => self.switch_view(View::Repositories),
             KeyCode::Char('f') => self.switch_view(View::Focuses),
-            KeyCode::PageDown if self.view != View::Issues => {
+            KeyCode::PageDown if !matches!(self.view, View::Issues | View::Activity) => {
                 self.detail_scroll = self.detail_scroll.saturating_add(10)
             }
-            KeyCode::PageUp if self.view != View::Issues => {
+            KeyCode::PageUp if !matches!(self.view, View::Issues | View::Activity) => {
                 self.detail_scroll = self.detail_scroll.saturating_sub(10)
             }
             KeyCode::Char('?') => self.help = true,
-            KeyCode::Tab if self.view != View::Issues => self.detail = !self.detail,
+            KeyCode::Tab if !matches!(self.view, View::Issues | View::Activity) => {
+                self.detail = !self.detail
+            }
             _ => return None,
         }
         Some(Action::None)
@@ -455,6 +467,8 @@ impl App {
         self.detail = false;
         self.issue_pane = Pane::List;
         self.issue_scroll.set(0);
+        self.activity_pane = Pane::List;
+        self.activity_scroll.set(0);
     }
 
     fn handle_repo_key(&mut self, code: KeyCode) -> Result<Action> {
@@ -609,7 +623,60 @@ impl App {
     }
 
     fn handle_activity_key(&mut self, code: KeyCode) -> Result<Action> {
+        if self.feed_details {
+            match code {
+                KeyCode::Esc | KeyCode::Char('e') => self.feed_details = false,
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.detail_scroll = self.detail_scroll.saturating_add(1)
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.detail_scroll = self.detail_scroll.saturating_sub(1)
+                }
+                KeyCode::PageDown => self.detail_scroll = self.detail_scroll.saturating_add(10),
+                KeyCode::PageUp => self.detail_scroll = self.detail_scroll.saturating_sub(10),
+                KeyCode::Char('r') => return Ok(Action::FetchActivity),
+                _ => {}
+            }
+            return Ok(Action::None);
+        }
         match code {
+            KeyCode::Enter if self.current_activity().is_some() => {
+                self.activity_pane = Pane::Details
+            }
+            KeyCode::Tab if self.current_activity().is_some() => {
+                self.detail = !self.detail;
+                self.activity_pane = Pane::Details;
+            }
+            KeyCode::Esc if self.activity_pane == Pane::Details => {
+                self.activity_pane = Pane::List;
+                self.detail = false;
+            }
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::PageDown
+                if self.activity_pane == Pane::Details =>
+            {
+                let step = if code == KeyCode::PageDown {
+                    self.activity_page_height.get()
+                } else {
+                    1
+                };
+                self.activity_scroll.set(
+                    self.activity_scroll
+                        .get()
+                        .saturating_add(step)
+                        .min(self.activity_scroll_max.get()),
+                );
+            }
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::PageUp
+                if self.activity_pane == Pane::Details =>
+            {
+                let step = if code == KeyCode::PageUp {
+                    self.activity_page_height.get()
+                } else {
+                    1
+                };
+                self.activity_scroll
+                    .set(self.activity_scroll.get().saturating_sub(step));
+            }
             KeyCode::Char('r') => return Ok(Action::FetchActivity),
             KeyCode::Char('a') => {
                 if let (Some(account), Some(event)) = (&self.account, self.current_activity()) {

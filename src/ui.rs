@@ -213,12 +213,24 @@ fn draw_shortcuts(frame: &mut Frame, app: &App, area: Rect) {
             ("o", "open"),
             ("s", "save focus"),
         ],
+        View::Activity if app.feed_details => {
+            vec![("j/k", "scroll"), ("PgUp/Dn", "page"), ("Esc", "back")]
+        }
+        View::Activity if app.activity_pane == Pane::Details => vec![
+            ("j/k", "scroll"),
+            ("PgUp/Dn", "page"),
+            ("Esc", "list"),
+            ("o", "open"),
+            ("a", "read/unread"),
+            ("Tab", "expand"),
+        ],
         View::Activity => vec![
+            ("Enter", "details"),
             ("a", "read/unread"),
             ("u", "unread"),
             ("e", "sync"),
             ("v", "reviews"),
-            ("Tab", "details"),
+            ("o", "open"),
         ],
         View::Focuses => vec![
             ("j/k", "move"),
@@ -830,9 +842,10 @@ fn draw_activity(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         );
         return;
     }
-    let columns = panes(rows[1], app.detail);
-    if !app.detail {
-        let block = panel(" Activity inbox ", false);
+    let details_only = app.detail || (rows[1].width < 88 && app.activity_pane == Pane::Details);
+    let columns = panes(rows[1], details_only);
+    if !details_only {
+        let block = panel(" Activity inbox ", app.activity_pane == Pane::List);
         if events.is_empty() {
             let message = if app.account.is_none() {
                 if app.busy {
@@ -913,7 +926,7 @@ fn draw_activity(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             );
         }
     }
-    if app.detail || columns.len() > 1 {
+    if details_only || columns.len() > 1 {
         let body = app
             .current_activity()
             .map(|event| {
@@ -943,7 +956,7 @@ fn draw_activity(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                     )),
                     Line::from(""),
                 ];
-                lines.extend(body_lines(&event.body));
+                lines.extend(markdown_lines(&event.body));
                 lines.extend([
                     Line::from(""),
                     metadata(clean(&event.url)),
@@ -957,12 +970,25 @@ fn draw_activity(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 lines
             })
             .unwrap_or_else(|| vec![metadata("Select activity to read the update.")]);
-        frame.render_widget(
-            Paragraph::new(body)
-                .wrap(Wrap { trim: false })
-                .scroll((app.detail_scroll, 0))
-                .block(panel(" Update details ", false)),
-            *columns.last().unwrap(),
-        );
+        let identity = app
+            .current_activity()
+            .map(|event| (event.repo_id, event.key.clone()));
+        if *app.activity_rendered.borrow() != identity {
+            app.activity_rendered.replace(identity);
+            app.activity_scroll.set(0);
+        }
+        let area = *columns.last().unwrap();
+        let block = panel(" Update details ", app.activity_pane == Pane::Details);
+        let inner = block.inner(area);
+        let paragraph = Paragraph::new(body).wrap(Wrap { trim: false });
+        let max_scroll = paragraph
+            .line_count(inner.width)
+            .saturating_sub(usize::from(inner.height))
+            .min(usize::from(u16::MAX)) as u16;
+        app.activity_scroll_max.set(max_scroll);
+        app.activity_page_height.set(inner.height.max(1));
+        let scroll = app.activity_scroll.get().min(max_scroll);
+        app.activity_scroll.set(scroll);
+        frame.render_widget(paragraph.scroll((scroll, 0)).block(block), area);
     }
 }
