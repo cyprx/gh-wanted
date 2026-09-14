@@ -142,3 +142,17 @@ docker build --target artifact --output type=local,dest=dist .
 ```
 
 The artifact target exports a Linux executable for Docker's architecture. Build on your host for a native executable.
+
+## CI and releases
+
+GitHub Actions runs formatting, Clippy, and tests on Linux, Windows, and macOS for pushes to `main` or `master` and pull requests targeting either branch or `release`. Linux also runs the offline terminal walkthrough. CI uses Rust 1.94, matching the Docker build.
+
+To publish a release:
+
+1. Set a new package version in `Cargo.toml` and update `Cargo.lock` with `cargo check`.
+2. Commit those files with your changes and merge them into the `release` branch.
+3. Pushing `release` runs the same CI checks, builds the binaries, and publishes a GitHub Release tagged `v<package-version>` at that commit.
+
+Each release includes Linux x86_64 (GNU, built on Ubuntu 22.04), Windows x86_64, and macOS Apple Silicon archives, plus `SHA256SUMS`. GitHub CLI must still be installed separately. Versions such as `0.2.0-rc.1` are marked as prereleases. An existing version tag causes the workflow to stop without replacing published assets; bump the version before the next release.
+
+The workflow uses the built-in `GITHUB_TOKEN`; no personal access token is needed. Only the publishing job requests write access. You can also run it manually from Actions with the `release` branch selected. Repository rules must allow that job to create release tags.

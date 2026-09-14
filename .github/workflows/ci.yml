@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master, release]
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2022, macos-14]
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: rustup toolchain install 1.94.0 --profile minimal --component rustfmt --component clippy
+      - name: Check formatting
+        run: cargo +1.94.0 fmt --check
+      - name: Lint
+        run: cargo +1.94.0 clippy --locked --all-targets -- -D warnings
+      - name: Test
+        run: cargo +1.94.0 test --locked
+      - name: Build for terminal walkthrough
+        if: runner.os == 'Linux'
+        run: cargo +1.94.0 build --locked
+      - name: Test demo keyboard walkthrough
+        if: runner.os == 'Linux'
+        run: python3 tests/pty_smoke.py
