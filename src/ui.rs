@@ -582,34 +582,41 @@ fn draw_discovery(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 .issue_status
                 .get(&repo.id)
                 .map(String::as_str)
-                .unwrap_or("Not fetched; r loads issues");
-            (status != "Complete").then(|| format!("{}: {}", clean(&repo.full_name), clean(status)))
+                .unwrap_or("");
+            status
+                .starts_with("Incomplete:")
+                .then(|| format!("{}: {}", clean(&repo.full_name), clean(status)))
         })
         .collect();
     frame.render_widget(
         Paragraph::new(vec![
             heading(format!(
-                "Updated in last {} days  /  {}/{} repositories loaded{}",
+                "Last {} days • {}/{} repositories loaded{}",
                 app.issue_window_days(),
                 complete,
                 visible.len(),
-                if complete < visible.len() {
+                if app.busy && complete < visible.len() {
+                    " • refreshing"
+                } else if complete < visible.len() {
                     " • INCOMPLETE"
                 } else {
                     ""
                 }
             )),
-            metadata(if failures.is_empty() {
-                if app.query.is_empty() {
-                    "All watched repositories".into()
+            metadata(if let Some(first) = failures.first() {
+                format!("{} failed • {first}", failures.len())
+            } else if complete < visible.len() {
+                if app.busy {
+                    format!("{} remaining", visible.len() - complete)
                 } else {
-                    format!("Repositories: {}", clean(&app.query))
+                    "Press r to load issues".into()
                 }
+            } else if app.query.is_empty() {
+                "All watched repositories".into()
             } else {
-                failures.join(" | ")
+                format!("Repositories: {}", clean(&app.query))
             }),
-        ])
-        .wrap(Wrap { trim: true }),
+        ]),
         rows[0],
     );
     let details_only = app.detail || (rows[1].width < 88 && app.issue_pane == Pane::Details);
@@ -624,7 +631,11 @@ fn draw_discovery(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             let text = if visible.is_empty() {
                 "No repositories match. Press b and change the repository filter with /."
             } else if complete < visible.len() {
-                "Issue results are incomplete. Wait for loading, or press r to retry. b returns to repositories."
+                if app.busy {
+                    "Loading issues…"
+                } else {
+                    "Results incomplete. Press r to retry."
+                }
             } else {
                 "No recent issues match. Press / and use days:30 for a wider window, or change labels, keywords, state, or unassigned. Default: days:7 state:open."
             };

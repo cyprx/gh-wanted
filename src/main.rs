@@ -286,7 +286,7 @@ fn updates(app: &mut App, receiver: &Receiver<Update>) {
                 app.activity_pending.clear();
                 app.next_refresh = app.now.saturating_add(gh_wanted::sync::REFRESH_SECONDS);
                 if app.feeds.iter().all(|f| f.error.is_none()) {
-                    app.status = "Activity saved. d Today/catch-up; a acknowledge; refresh every 15 minutes while running".into();
+                    app.status = "Activity updated".into();
                 }
                 Ok(())
             }
@@ -299,7 +299,7 @@ fn updates(app: &mut App, receiver: &Receiver<Update>) {
             }
             Update::IssuesDone => {
                 app.busy = false;
-                app.status = "Issue refresh finished. Repository completion is shown above. r retries; s saves focus".into();
+                app.status = "Issue refresh finished".into();
                 Ok(())
             }
             Update::Account(account) => app.identify(account),
@@ -455,7 +455,7 @@ fn run() -> Result<()> {
                                     demo_issues(&mut app, &repos);
                                 } else if !repos.is_empty() {
                                     app.busy = true;
-                                    app.status = "Loading all issue pages; results remain incomplete until each repository finishes".into();
+                                    app.status = "Refreshing issues…".into();
                                     worker = Some(start_issues(
                                         sender.clone(),
                                         cancellation.clone(),

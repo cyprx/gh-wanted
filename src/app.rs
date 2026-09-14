@@ -279,7 +279,7 @@ impl App {
         self.repositories = self.store.repositories(id)?;
         self.load_tags()?;
         self.load_activity()?;
-        self.status = "Refreshing watched repositories (cached data may be stale)...".into();
+        self.status = "Refreshing repositories…".into();
         Ok(())
     }
     fn load_tags(&mut self) -> Result<()> {
@@ -815,7 +815,7 @@ impl App {
             .map(|r| (r.repo.id, r.state.feed.clone()))
             .collect();
         self.busy = !requests.is_empty();
-        self.status = "Loading activity; first sync covers the last 24 hours, later syncs catch up from saved checkpoints".into();
+        self.status = "Refreshing activity…".into();
         Ok(requests)
     }
     pub fn apply_activity(
