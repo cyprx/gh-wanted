@@ -65,7 +65,14 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 ```
 
-CI checks Linux, Windows, and macOS. To publish, bump the version in `Cargo.toml` and `Cargo.lock`, then push to `release`; the workflow tests, builds, and publishes `v<version>` with binary archives and checksums. Existing tags are never replaced.
+CI checks Linux, Windows, and macOS. To publish, commit the version in `Cargo.toml` and `Cargo.lock`, then push a matching tag:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The workflow checks the version, tests, builds, and publishes the GitHub Release with binary archives and checksums. Existing releases are never replaced. Manual runs of the Release workflow validate builds without publishing.
 
 For refresh diagnostics, run `gh-wanted --refresh-metrics`. See [refresh monitoring](docs/refresh-monitoring.md).
 

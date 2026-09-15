@@ -2,28 +2,21 @@ name: Release
 
 on:
   push:
-    branches: [release]
+    tags: ['v*']
   workflow_dispatch:
-    inputs:
-      publish:
-        description: Publish a release (release branch only)
-        type: boolean
-        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: release
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   check:
-    if: github.ref == 'refs/heads/release' || github.event_name == 'workflow_dispatch'
     uses: ./.github/workflows/ci.yml
 
   version:
-    if: github.ref == 'refs/heads/release' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-22.04
     timeout-minutes: 5
     outputs:
@@ -38,17 +31,15 @@ jobs:
         run: |
           version=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "gh-wanted") | .version')
           echo "tag=v$version" >> "$GITHUB_OUTPUT"
-      - name: Require an unused version tag
-        if: github.ref == 'refs/heads/release' && (github.event_name == 'push' || inputs.publish)
+      - name: Verify pushed tag matches package version
+        if: github.event_name == 'push'
         env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
           TAG: ${{ steps.version.outputs.tag }}
+          PUSHED_TAG: ${{ github.ref_name }}
         shell: bash
         run: |
-          existing=$(gh api "repos/$GH_REPO/git/matching-refs/tags/$TAG" --jq ".[] | select(.ref == \"refs/tags/$TAG\") | .ref")
-          if [ -n "$existing" ]; then
-            echo "::error::Tag $TAG already exists. Bump Cargo.toml and Cargo.lock for a new release."
+          if [ "$PUSHED_TAG" != "$TAG" ]; then
+            echo "::error::Pushed tag must match Cargo.toml version ($TAG)."
             exit 1
           fi
 
@@ -113,7 +104,7 @@ jobs:
           retention-days: 7
 
   publish:
-    if: github.ref == 'refs/heads/release' && (github.event_name == 'push' || inputs.publish)
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: [version, build]
     runs-on: ubuntu-22.04
     timeout-minutes: 10
@@ -133,10 +124,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ needs.version.outputs.tag }}
-          COMMIT: ${{ github.sha }}
         shell: bash
         run: |
-          args=(--repo "$GH_REPO" --target "$COMMIT" --title "gh-wanted $TAG" --generate-notes)
+          args=(--repo "$GH_REPO" --verify-tag --title "gh-wanted $TAG" --generate-notes)
           if [[ "$TAG" == *-* ]]; then
             args+=(--prerelease)
           fi
