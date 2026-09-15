@@ -16,18 +16,26 @@ Refresh follows the active tab, pausing and resuming as you move. GitHub access 
 
 ## Get started
 
-Install Rust **1.88+** and the GitHub CLI (`gh`), then run from this repository:
+Download an archive from [GitHub Releases](https://github.com/cyprx/gh-wanted/releases) for your platform:
+
+| Platform | Archive suffix |
+| --- | --- |
+| Windows x86_64 | `x86_64-pc-windows-msvc.zip` |
+| Linux x86_64 (GNU) | `x86_64-unknown-linux-gnu.tar.gz` |
+| macOS Apple Silicon | `aarch64-apple-darwin.tar.gz` |
+
+Extract it and put `gh-wanted` (Windows: `gh-wanted.exe`) in a directory on your `PATH`. No Rust installation is needed. Install [GitHub CLI](https://cli.github.com/) separately, then:
 
 ```sh
 # Try fictional data without an account
-cargo run --locked -- --demo
+gh-wanted --demo
 
 # Connect to GitHub
 gh auth login --hostname github.com
-cargo run --locked
+gh-wanted
 ```
 
-To install locally: `cargo install --locked --path .`, then run `gh-wanted`.
+Prefer building from source? With Rust **1.88+**, run `cargo install --locked --path .` from this repository.
 A terminal of **100 × 30** or larger is recommended.
 
 ## Controls
@@ -73,7 +81,5 @@ git push origin v0.1.0
 ```
 
 The workflow checks the version, tests, builds, and publishes the GitHub Release with binary archives and checksums. Existing releases are never replaced. Manual runs of the Release workflow validate builds without publishing.
-
-For refresh diagnostics, run `gh-wanted --refresh-metrics`. See [refresh monitoring](docs/refresh-monitoring.md).
 
 Contributions welcome—see [CONTRIBUTING.md](CONTRIBUTING.md). Licensed under [MIT](LICENSE).
