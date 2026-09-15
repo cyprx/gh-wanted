@@ -4,6 +4,11 @@ on:
   push:
     branches: [release]
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish a release (release branch only)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -14,11 +19,11 @@ concurrency:
 
 jobs:
   check:
-    if: github.ref == 'refs/heads/release'
+    if: github.ref == 'refs/heads/release' || github.event_name == 'workflow_dispatch'
     uses: ./.github/workflows/ci.yml
 
   version:
-    if: github.ref == 'refs/heads/release'
+    if: github.ref == 'refs/heads/release' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-22.04
     timeout-minutes: 5
     outputs:
@@ -34,6 +39,7 @@ jobs:
           version=$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "gh-wanted") | .version')
           echo "tag=v$version" >> "$GITHUB_OUTPUT"
       - name: Require an unused version tag
+        if: github.ref == 'refs/heads/release' && (github.event_name == 'push' || inputs.publish)
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -76,7 +82,7 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           mkdir -p dist
-          tar -czf "dist/gh-wanted-$TAG-$TARGET.tar.gz" -C "target/$TARGET/release" gh-wanted
+          tar -czf "dist/gh-wanted-$TAG-$TARGET.tar.gz" LICENSE -C "target/$TARGET/release" gh-wanted
       - name: Package Windows
         if: runner.os == 'Windows'
         shell: pwsh
@@ -85,7 +91,20 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          Compress-Archive -LiteralPath "target/$env:TARGET/release/gh-wanted.exe" -DestinationPath "dist/gh-wanted-$env:TAG-$env:TARGET.zip"
+          Compress-Archive -LiteralPath "target/$env:TARGET/release/gh-wanted.exe", "LICENSE" -DestinationPath "dist/gh-wanted-$env:TAG-$env:TARGET.zip"
+      - name: Verify packaged binary and license
+        shell: bash
+        run: |
+          mkdir verify
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            unzip dist/*.zip -d verify
+            binary=./verify/gh-wanted.exe
+          else
+            tar -xzf dist/*.tar.gz -C verify
+            binary=./verify/gh-wanted
+          fi
+          cmp LICENSE verify/LICENSE
+          "$binary" --help
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: release-${{ matrix.target }}
@@ -94,6 +113,7 @@ jobs:
           retention-days: 7
 
   publish:
+    if: github.ref == 'refs/heads/release' && (github.event_name == 'push' || inputs.publish)
     needs: [version, build]
     runs-on: ubuntu-22.04
     timeout-minutes: 10

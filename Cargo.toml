@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.88"
 description = "A terminal watchlist for open-source contributors"
+license = "MIT"
+repository = "https://github.com/cyprx/gh-wanted"
 
 [dependencies]
 anyhow = "1"

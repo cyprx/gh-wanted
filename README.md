@@ -68,3 +68,5 @@ cargo test --locked
 CI checks Linux, Windows, and macOS. To publish, bump the version in `Cargo.toml` and `Cargo.lock`, then push to `release`; the workflow tests, builds, and publishes `v<version>` with binary archives and checksums. Existing tags are never replaced.
 
 For refresh diagnostics, run `gh-wanted --refresh-metrics`. See [refresh monitoring](docs/refresh-monitoring.md).
+
+Contributions welcome—see [CONTRIBUTING.md](CONTRIBUTING.md). Licensed under [MIT](LICENSE).
