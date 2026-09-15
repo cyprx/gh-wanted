@@ -5,6 +5,7 @@ pub mod github;
 pub mod issues;
 pub mod metrics;
 pub mod repositories;
+pub mod scheduler;
 pub mod store;
 pub mod sync;
 pub mod ui;

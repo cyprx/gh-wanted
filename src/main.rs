@@ -2,9 +2,10 @@ use anyhow::{Context, Result};
 use crossterm::event::{self, Event, KeyEventKind};
 use directories::ProjectDirs;
 use gh_wanted::{
-    app::{Action, App},
+    app::{Action, App, View},
     github::{Account, GhClient, Snapshot},
     repositories::Repository,
+    scheduler::{Lane, Scheduler},
     store::Store,
     ui,
 };
@@ -30,14 +31,112 @@ enum Update {
     ActivityDone,
 }
 
+type Message = (Lane, u64, Update);
+struct WorkerSender {
+    sender: SyncSender<Message>,
+    lane: Lane,
+    generation: u64,
+    scheduler: Arc<Scheduler>,
+}
+impl WorkerSender {
+    fn send(&self, update: Update) -> Result<()> {
+        self.sender
+            .send((self.lane, self.generation, update))
+            .map_err(|_| anyhow::anyhow!("UI closed"))
+    }
+}
+
+#[derive(Default)]
+struct Refreshes {
+    scheduler: Arc<Scheduler>,
+    generations: std::collections::HashMap<Lane, u64>,
+    running: std::collections::HashMap<Lane, Arc<AtomicBool>>,
+    workers: Vec<thread::JoinHandle<()>>,
+}
+impl Refreshes {
+    fn begin(
+        &mut self,
+        lane: Lane,
+        sender: &SyncSender<Message>,
+    ) -> (WorkerSender, Arc<AtomicBool>) {
+        self.cancel(lane);
+        let generation = self.generations.entry(lane).or_default();
+        *generation += 1;
+        let cancellation = Arc::new(AtomicBool::new(false));
+        self.running.insert(lane, cancellation.clone());
+        (
+            WorkerSender {
+                sender: sender.clone(),
+                lane,
+                generation: *generation,
+                scheduler: self.scheduler.clone(),
+            },
+            cancellation,
+        )
+    }
+    fn cancel(&mut self, lane: Lane) {
+        if let Some(token) = self.running.remove(&lane) {
+            token.store(true, Ordering::Relaxed);
+        }
+        *self.generations.entry(lane).or_default() += 1;
+    }
+    fn focus(&self, app: &mut App) {
+        let lane = match app.view {
+            View::Activity => Some(Lane::Activity),
+            View::Issues => Some(Lane::Issues),
+            View::Repositories => Some(Lane::Repositories),
+            View::Focuses => None,
+        };
+        self.scheduler.activate(lane);
+        app.busy = self.running.contains_key(&Lane::Repositories)
+            || lane.is_some_and(|lane| self.running.contains_key(&lane));
+    }
+    fn activity(
+        &mut self,
+        sender: &SyncSender<Message>,
+        requests: Vec<gh_wanted::sync::FeedRequest>,
+        trigger: &'static str,
+    ) {
+        let (sender, cancellation) = self.begin(Lane::Activity, sender);
+        self.workers
+            .push(start_activity(sender, cancellation, requests, trigger));
+    }
+    fn issues(
+        &mut self,
+        sender: &SyncSender<Message>,
+        account: Account,
+        repos: Vec<Repository>,
+        days: u16,
+        now: i64,
+    ) {
+        let (sender, cancellation) = self.begin(Lane::Issues, sender);
+        self.workers.push(start_issues(
+            sender,
+            cancellation,
+            account,
+            repos,
+            days,
+            now,
+        ));
+    }
+    fn repositories(&mut self, sender: &SyncSender<Message>) {
+        self.cancel(Lane::Activity);
+        self.cancel(Lane::Issues);
+        let (sender, cancellation) = self.begin(Lane::Repositories, sender);
+        self.workers.push(start_sync(sender, cancellation));
+    }
+}
+
 fn metrics_path() -> Result<std::path::PathBuf> {
     let dirs =
         ProjectDirs::from("", "", "gh-wanted").context("Cannot determine local data directory")?;
     Ok(dirs.data_local_dir().join("refresh-metrics.jsonl"))
 }
 
-fn refresh_client(cancellation: Arc<AtomicBool>, kind: &str) -> GhClient {
-    let client = GhClient::default().with_cancellation(cancellation);
+fn refresh_client(cancellation: Arc<AtomicBool>, kind: &str, sender: &WorkerSender) -> GhClient {
+    let client = GhClient::default()
+        .with_cancellation(cancellation)
+        .with_scheduler(sender.scheduler.clone(), sender.lane);
     match metrics_path() {
         Ok(path) => client.with_metrics(path, kind),
         Err(_) => client,
@@ -52,13 +151,13 @@ fn binding_failure(error: &anyhow::Error) -> anyhow::Error {
 }
 
 fn start_activity(
-    sender: SyncSender<Update>,
+    sender: WorkerSender,
     cancellation: Arc<AtomicBool>,
     requests: Vec<gh_wanted::sync::FeedRequest>,
     trigger: &'static str,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
-        let client = refresh_client(cancellation.clone(), "activity");
+        let client = refresh_client(cancellation.clone(), "activity", &sender);
         client.record_refresh_plan(
             trigger,
             requests.first().map(|r| r.account.id),
@@ -136,7 +235,7 @@ fn demo_activity(app: &mut App, requests: Vec<gh_wanted::sync::FeedRequest>) -> 
 }
 
 fn start_issues(
-    sender: SyncSender<Update>,
+    sender: WorkerSender,
     cancellation: Arc<AtomicBool>,
     account: Account,
     repos: Vec<Repository>,
@@ -144,7 +243,7 @@ fn start_issues(
     now: i64,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
-        let client = refresh_client(cancellation.clone(), "issues");
+        let client = refresh_client(cancellation.clone(), "issues", &sender);
         client.record_refresh_plan("manual", Some(account.id), repos.len());
         let client = client
             .with_issue_window(days, now)
@@ -222,9 +321,9 @@ fn open_url(url: &str) -> Result<()> {
     Ok(())
 }
 
-fn start_sync(sender: SyncSender<Update>, cancellation: Arc<AtomicBool>) -> thread::JoinHandle<()> {
+fn start_sync(sender: WorkerSender, cancellation: Arc<AtomicBool>) -> thread::JoinHandle<()> {
     thread::spawn(move || {
-        let client = refresh_client(cancellation, "repositories");
+        let client = refresh_client(cancellation, "repositories", &sender);
         let result = (|| {
             let client = client.bind(None)?;
             let account = client.account()?;
@@ -277,15 +376,24 @@ fn demo(app: &mut App) -> Result<()> {
     })
 }
 
-fn updates(app: &mut App, receiver: &Receiver<Update>) {
-    while let Ok(update) = receiver.try_recv() {
+fn updates(app: &mut App, receiver: &Receiver<Message>, refreshes: &mut Refreshes) {
+    while let Ok((lane, generation, update)) = receiver.try_recv() {
+        if refreshes.generations.get(&lane) != Some(&generation) {
+            continue;
+        }
+        if matches!(
+            &update,
+            Update::Done(_) | Update::ActivityDone | Update::IssuesDone
+        ) {
+            refreshes.running.remove(&lane);
+        }
         let result = match update {
             Update::Activity(request, result) => app.apply_activity(&request, result),
             Update::ActivityDone => {
                 app.busy = false;
                 app.activity_pending.clear();
                 app.next_refresh = app.now.saturating_add(gh_wanted::sync::REFRESH_SECONDS);
-                if app.feeds.iter().all(|f| f.error.is_none()) {
+                if app.view == View::Activity && app.feeds.iter().all(|f| f.error.is_none()) {
                     app.status = "Activity updated".into();
                 }
                 Ok(())
@@ -299,7 +407,9 @@ fn updates(app: &mut App, receiver: &Receiver<Update>) {
             }
             Update::IssuesDone => {
                 app.busy = false;
-                app.status = "Issue refresh finished".into();
+                if app.view == View::Issues {
+                    app.status = "Issue refresh finished".into();
+                }
                 Ok(())
             }
             Update::Account(account) => app.identify(account),
@@ -343,30 +453,57 @@ fn run() -> Result<()> {
     };
     let mut app = App::new(store, is_demo);
     let (sender, receiver) = mpsc::sync_channel(2);
-    let cancellation = Arc::new(AtomicBool::new(false));
-    let mut worker = None;
+    let mut refreshes = Refreshes::default();
     if is_demo {
         demo(&mut app)?;
         let requests = app.prepare_activity(true, None)?;
         demo_activity(&mut app, requests)?;
     } else {
         app.busy = true;
-        worker = Some(start_sync(sender.clone(), cancellation.clone()));
+        refreshes.repositories(&sender);
     }
     let mut terminal = ratatui::init();
     let result = (|| -> Result<()> {
         loop {
             app.now = chrono::Utc::now().timestamp();
-            updates(&mut app, &receiver);
-            if app.auto_due() {
+            updates(&mut app, &receiver, &mut refreshes);
+            refreshes.focus(&mut app);
+            refreshes.workers.retain(|worker| !worker.is_finished());
+            // Navigation during initial discovery should load once repositories arrive.
+            if !is_demo
+                && app.view == View::Issues
+                && !app.busy
+                && !app.auto_paused
+                && app.check_network_window().is_ok()
+                && app
+                    .visible()
+                    .iter()
+                    .any(|i| !app.issue_status.contains_key(&app.repositories[*i].id))
+            {
+                if let Some(account) = app.account.clone() {
+                    refreshes.scheduler.retry(app.now);
+                    let mut repos: Vec<_> = app
+                        .visible()
+                        .into_iter()
+                        .filter(|i| !app.issue_status.contains_key(&app.repositories[*i].id))
+                        .map(|i| app.repositories[i].clone())
+                        .collect();
+                    repos.sort_by_key(|repo| app.refresh_priority(repo.id));
+                    for repo in &repos {
+                        app.issue_status.insert(repo.id, "Loading".into());
+                    }
+                    refreshes.issues(&sender, account, repos, app.issue_window_days(), app.now);
+                    refreshes.focus(&mut app);
+                }
+            }
+            if app.view == View::Activity
+                && !refreshes.running.contains_key(&Lane::Activity)
+                && app.auto_due()
+            {
+                refreshes.scheduler.retry(app.now);
                 match app.prepare_activity(false, None) {
                     Ok(requests) if !requests.is_empty() => {
-                        worker = Some(start_activity(
-                            sender.clone(),
-                            cancellation.clone(),
-                            requests,
-                            "automatic",
-                        ))
+                        refreshes.activity(&sender, requests, "automatic")
                     }
                     Err(error) => {
                         app.status = format!("Automatic activity refresh failed: {error}");
@@ -381,7 +518,23 @@ fn run() -> Result<()> {
                     if key.kind != KeyEventKind::Press {
                         continue;
                     }
+                    let previous_view = app.view;
+                    let previous_days = app.issue_window_days();
                     let action = app.key(key);
+                    if previous_days != app.issue_window_days() {
+                        refreshes.cancel(Lane::Issues);
+                    }
+                    refreshes.focus(&mut app);
+                    // Returning to an unfinished refresh resumes its retained page state.
+                    if matches!(&action, Ok(Action::FetchIssues))
+                        && refreshes.running.contains_key(&Lane::Issues)
+                    {
+                        app.status = "Resuming issues…".into();
+                        continue;
+                    }
+                    if previous_view != app.view && app.busy {
+                        app.status = "Resuming refresh…".into();
+                    }
                     if matches!(
                         &action,
                         Ok(Action::Refresh
@@ -393,6 +546,7 @@ fn run() -> Result<()> {
                             app.status = error.to_string();
                             continue;
                         }
+                        refreshes.scheduler.retry(app.now);
                     }
                     match action {
                         Ok(action @ (Action::FetchActivity | Action::FetchReviews(..))) => {
@@ -403,12 +557,7 @@ fn run() -> Result<()> {
                             match app.prepare_activity(true, review) {
                                 Ok(requests) if is_demo => demo_activity(&mut app, requests)?,
                                 Ok(requests) if !requests.is_empty() => {
-                                    worker = Some(start_activity(
-                                        sender.clone(),
-                                        cancellation.clone(),
-                                        requests,
-                                        "manual",
-                                    ))
+                                    refreshes.activity(&sender, requests, "manual")
                                 }
                                 Ok(_) => app.status =
                                     "No watched repositories to refresh. b returns to repositories"
@@ -456,32 +605,34 @@ fn run() -> Result<()> {
                                 } else if !repos.is_empty() {
                                     app.busy = true;
                                     app.status = "Refreshing issues…".into();
-                                    worker = Some(start_issues(
-                                        sender.clone(),
-                                        cancellation.clone(),
+                                    refreshes.issues(
+                                        &sender,
                                         account,
                                         repos,
                                         app.issue_window_days(),
                                         app.now,
-                                    ));
+                                    );
                                 }
                             } else {
                                 app.status = "Connect first: b returns to repositories, r retries connection".into();
                             }
                         }
                         Ok(Action::FetchIssues) => {
-                            app.status =
-                                "Another refresh is running. Press r in Issues when it finishes"
-                                    .into()
+                            app.status = "Issues will load after repository discovery".into()
                         }
                         Ok(Action::Quit) => break,
-                        Ok(Action::Refresh) if !app.busy => {
+                        Ok(Action::Refresh)
+                            if !refreshes.running.contains_key(&Lane::Repositories) =>
+                        {
                             if is_demo {
                                 demo(&mut app)?;
                             } else {
                                 app.busy = true;
-                                app.status = "Refreshing...".into();
-                                worker = Some(start_sync(sender.clone(), cancellation.clone()));
+                                app.activity_pending.clear();
+                                app.next_refresh = 0;
+                                app.issue_status.clear();
+                                app.status = "Refreshing repositories…".into();
+                                refreshes.repositories(&sender);
                             }
                         }
                         Err(error) => app.status = format!("Action failed: {error}"),
@@ -492,10 +643,12 @@ fn run() -> Result<()> {
         }
         Ok(())
     })();
-    cancellation.store(true, Ordering::Relaxed);
+    for cancellation in refreshes.running.values() {
+        cancellation.store(true, Ordering::Relaxed);
+    }
     drop(receiver);
     ratatui::restore();
-    if let Some(worker) = worker {
+    for worker in refreshes.workers {
         worker
             .join()
             .map_err(|_| anyhow::anyhow!("Sync worker panicked"))?;
@@ -506,5 +659,50 @@ fn main() {
     if let Err(error) = run() {
         eprintln!("gh-wanted: {error:#}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn switching_views_changes_busy_without_cancelling_refreshes() {
+        let (sender, _) = mpsc::sync_channel(4);
+        let mut refreshes = Refreshes::default();
+        let mut app = App::new(Store::memory().unwrap(), true);
+        let (_, activity) = refreshes.begin(Lane::Activity, &sender);
+        refreshes.focus(&mut app);
+        assert!(app.busy);
+        app.view = View::Issues;
+        refreshes.focus(&mut app);
+        assert!(!app.busy);
+        assert!(!activity.load(Ordering::Relaxed));
+        let (_, issues) = refreshes.begin(Lane::Issues, &sender);
+        refreshes.focus(&mut app);
+        assert!(app.busy);
+        app.view = View::Focuses;
+        refreshes.focus(&mut app);
+        assert!(!app.busy);
+        assert!(!issues.load(Ordering::Relaxed));
+        app.view = View::Activity;
+        refreshes.focus(&mut app);
+        assert!(app.busy);
+    }
+
+    #[test]
+    fn obsolete_completion_cannot_finish_a_replacement_refresh() {
+        let (sender, receiver) = mpsc::sync_channel(4);
+        let mut refreshes = Refreshes::default();
+        let mut app = App::new(Store::memory().unwrap(), true);
+        let (old, cancellation) = refreshes.begin(Lane::Issues, &sender);
+        let (new, _) = refreshes.begin(Lane::Issues, &sender);
+        assert!(cancellation.load(Ordering::Relaxed));
+        old.send(Update::IssuesDone).unwrap();
+        updates(&mut app, &receiver, &mut refreshes);
+        assert!(refreshes.running.contains_key(&Lane::Issues));
+        new.send(Update::IssuesDone).unwrap();
+        updates(&mut app, &receiver, &mut refreshes);
+        assert!(!refreshes.running.contains_key(&Lane::Issues));
     }
 }

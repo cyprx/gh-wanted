@@ -34,6 +34,7 @@ pub struct GhClient {
     program: OsString,
     timeout: Duration,
     cancellation: Arc<AtomicBool>,
+    scheduler: Option<(Arc<crate::scheduler::Scheduler>, crate::scheduler::Lane)>,
 }
 
 impl Default for GhClient {
@@ -53,11 +54,21 @@ impl GhClient {
             program: program.into(),
             timeout,
             cancellation: Arc::new(AtomicBool::new(false)),
+            scheduler: None,
         }
     }
 
     pub fn with_cancellation(mut self, cancellation: Arc<AtomicBool>) -> Self {
         self.cancellation = cancellation;
+        self
+    }
+
+    pub fn with_scheduler(
+        mut self,
+        scheduler: Arc<crate::scheduler::Scheduler>,
+        lane: crate::scheduler::Lane,
+    ) -> Self {
+        self.scheduler = Some((scheduler, lane));
         self
     }
 
@@ -101,6 +112,12 @@ impl GhClient {
         });
         let account = self.account()?;
         if expected.is_some_and(|expected| expected.id != account.id) {
+            if let Some((scheduler, _)) = &self.scheduler {
+                scheduler.fail(crate::sync::RequestFailure {
+                    paused: true,
+                    retry_at: None,
+                });
+            }
             return Err(crate::sync::RequestFailure {
                 paused: true,
                 retry_at: None,
@@ -457,6 +474,19 @@ impl GhClient {
     }
 
     fn execute(&self, mut command: Command, record_http_failure: bool) -> Result<Vec<u8>> {
+        let waiting = Instant::now();
+        let _permit = self
+            .scheduler
+            .as_ref()
+            .map(|(scheduler, lane)| scheduler.acquire(*lane, &self.cancellation))
+            .transpose()?;
+        if self.scheduler.is_some() {
+            if let Some(metrics) = &self.metrics {
+                metrics.record(serde_json::json!({"event":"scheduler_wait", "duration_ms":waiting.elapsed().as_millis() as u64}));
+            }
+        }
+        // Recheck after waiting: a sibling may have hit a rate limit while paused.
+        self.check_refresh()?;
         anyhow::ensure!(
             !self.cancellation.load(Ordering::Relaxed),
             "GitHub sync cancelled"
@@ -493,6 +523,15 @@ impl GhClient {
             },
         );
         if result.is_err() {
+            if let Some((scheduler, _)) = &self.scheduler {
+                if let Some(policy) = result
+                    .as_ref()
+                    .err()
+                    .and_then(|e| e.downcast_ref::<crate::sync::RequestFailure>())
+                {
+                    scheduler.fail(policy.clone());
+                }
+            }
             let _ = child.kill();
             child
                 .wait()

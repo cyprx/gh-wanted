@@ -103,13 +103,15 @@ Browser opening is disabled in demo mode.
 
 ## Refresh and data
 
-Activity refreshes every 15 minutes while the app is running. The initial activity window is 24 hours; later refreshes resume from saved checkpoints with overlap and deduplication. A failed feed preserves its checkpoint and cached data.
+Activity refreshes when due (every 15 minutes) while Today is visible. The initial activity window is 24 hours; later refreshes resume from saved checkpoints with overlap and deduplication. A failed feed preserves its checkpoint and cached data.
 
 **Repos → `r` reloads the watched-repository list.** Today refreshes activity for repositories already loaded. Newly watched repositories need a Repo refresh first. GitHub custom notification subscriptions may be absent from the watched-list API; the app currently imports only repositories returned by that API. Releases are not currently tracked.
 
-Issue windows use **last updated time**, so an old issue with recent activity can appear. Quiet older issues are outside the window. Changing the window requests a refresh; if another refresh is running, retry with `r` afterward.
+Issue windows use **last updated time**, so an old issue with recent activity can appear. Quiet older issues are outside the window. Changing the window replaces the old issue refresh; cached results remain available.
 
-There is one refresh at a time, with up to three feed workers. Known-active repositories are prioritized. Each refresh binds one credential and verifies its account; switching the CLI account affects the next refresh. Credentials are held in memory for requests and are not written to the app's database or logs.
+Refresh follows the active tab. Switching between Today and Issues pauses the previous view before its next CLI request; in-flight requests finish, and returning resumes pagination in memory. Repos and Focuses pause both feeds. Repository discovery always runs because every view needs it, and a manual repository refresh cancels older feed refreshes. At most three CLI requests run across all views, with shared auth/rate-limit handling. Known-active repositories are prioritized within each view; moving between individual rows does not yet reorder requests.
+
+Each refresh binds one credential and verifies its account; switching the CLI account affects the next refresh. Credentials are held in memory for requests and are not written to the app's database or logs. Paused pagination is retained only while the app stays open; activity checkpoints still persist across restarts.
 
 Cached repositories, tags, focuses, activity, and acknowledgments are stored in `state.sqlite3` under the platform's local application-data directory. Data is isolated by GitHub account. Issues are held in memory. Demo mode uses temporary in-memory data.
 

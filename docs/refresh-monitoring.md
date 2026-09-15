@@ -1,5 +1,7 @@
 # Refresh monitoring
 
+`scheduler_wait` events record milliseconds spent waiting for the active tab or a free request slot. Feed and refresh durations include this wait, so a long elapsed refresh can reflect time spent on another tab rather than slow GitHub responses. Scheduling pauses between CLI calls and shares a three-request limit across views.
+
 Normal runs automatically append local diagnostics beside `state.sqlite3`.
 Run `cargo run -- --refresh-metrics` (or `gh-wanted --refresh-metrics`) to
 print that path and JSON summaries. No GitHub requests are made by this command.
