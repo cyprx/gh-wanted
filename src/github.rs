@@ -196,6 +196,18 @@ impl GhClient {
         })
     }
 
+    pub fn repository(&self, name: &str) -> Result<Repository> {
+        let name = crate::repositories::parse_repository(name)?;
+        self.check_refresh()?;
+        let repo: Repository = serde_json::from_slice(&self.api(&format!("repos/{name}"), false)?)
+            .context("GitHub returned an invalid repository")?;
+        anyhow::ensure!(
+            repo.id > 0 && crate::issues::valid_repo_name(&repo.full_name),
+            "Invalid repository identity"
+        );
+        Ok(repo)
+    }
+
     pub fn issues(
         &self,
         account: &Account,

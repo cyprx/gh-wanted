@@ -29,3 +29,5 @@ Keep pull requests focused. Describe the problem, the behavior after your change
 Include your OS, terminal, app version or commit, steps to reproduce, and what you expected. A screenshot helps for layout problems. For refresh problems, include relevant output from `gh-wanted --refresh-metrics` after checking it for information you don't want to share.
 
 Contributions are licensed under the repository's [MIT license](LICENSE).
+
+Local tracking adds schema 4 with a separate table; migration preserves watched repositories, tags, focuses, and activity. Older binaries reject schema 4. When testing a downgrade, use a pre-upgrade database backup; do not change the schema version by hand on real data.

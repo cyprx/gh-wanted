@@ -11,6 +11,19 @@ pub struct Repository {
     pub archived: bool,
 }
 
+pub fn parse_repository(input: &str) -> Result<String> {
+    let value = input.trim();
+    let name = value
+        .strip_prefix("https://github.com/")
+        .unwrap_or(value)
+        .trim_end_matches('/');
+    anyhow::ensure!(
+        crate::issues::valid_repo_name(name),
+        "Enter owner/repo or https://github.com/owner/repo"
+    );
+    Ok(name.to_owned())
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct RepoFilter {
     pub text: String,

@@ -24,6 +24,7 @@ enum Update {
     Done(Result<Snapshot>),
     Issues(u64, u64, u16, Result<Vec<gh_wanted::issues::Issue>>),
     IssuesDone,
+    Tracked(u64, Result<Repository>),
     Activity(
         gh_wanted::sync::FeedRequest,
         Result<Vec<gh_wanted::activity::Activity>>,
@@ -383,11 +384,14 @@ fn updates(app: &mut App, receiver: &Receiver<Message>, refreshes: &mut Refreshe
         }
         if matches!(
             &update,
-            Update::Done(_) | Update::ActivityDone | Update::IssuesDone
+            Update::Done(_) | Update::ActivityDone | Update::IssuesDone | Update::Tracked(..)
         ) {
             refreshes.running.remove(&lane);
         }
         let result = match update {
+            Update::Tracked(account, result) => {
+                result.and_then(|repo| app.apply_tracked(account, repo))
+            }
             Update::Activity(request, result) => app.apply_activity(&request, result),
             Update::ActivityDone => {
                 app.busy = false;
@@ -538,6 +542,7 @@ fn run() -> Result<()> {
                     if matches!(
                         &action,
                         Ok(Action::Refresh
+                            | Action::TrackRepository(_)
                             | Action::FetchIssues
                             | Action::FetchActivity
                             | Action::FetchReviews(..))
@@ -549,6 +554,22 @@ fn run() -> Result<()> {
                         refreshes.scheduler.retry(app.now);
                     }
                     match action {
+                        Ok(Action::TrackRepository(name)) => {
+                            if is_demo {
+                                app.status = "Tracking requires a real GitHub connection; disabled in demo mode".into();
+                            } else if let Some(account) = app.account.clone() {
+                                let (worker_sender, cancellation) =
+                                    refreshes.begin(Lane::Repositories, &sender);
+                                app.status = format!("Checking {name}…");
+                                refreshes.workers.push(thread::spawn(move || {
+                                    let result =
+                                        refresh_client(cancellation, "track", &worker_sender)
+                                            .bind(Some(&account))
+                                            .and_then(|client| client.repository(&name));
+                                    let _ = worker_sender.send(Update::Tracked(account.id, result));
+                                }));
+                            }
+                        }
                         Ok(action @ (Action::FetchActivity | Action::FetchReviews(..))) => {
                             let review = match action {
                                 Action::FetchReviews(repo, number) => Some((repo, number)),

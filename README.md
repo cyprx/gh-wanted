@@ -48,6 +48,7 @@ A terminal of **100 × 30** or larger is recommended.
 | PgUp / PgDn | Scroll details by page |
 | Tab / `o` | Expand details / open in browser |
 | `/` / `t` / `s` | Filter / edit local tags / save focus |
+| `+` / `x` | Track a repo in Repos / remove local tracking from Repo Details |
 | `a` / `u` | Mark activity read or unread / show unread only |
 | `r` / `e` | Refresh / show Today sync details |
 | `?` / `q` | All shortcuts / quit |
@@ -63,7 +64,7 @@ label:"good first issue" unassigned
 days:30 label:bug state:open
 ```
 
-Newly watched repository missing? Press `b`, then `r`. GitHub custom notification subscriptions may be absent from its watched-list API. Releases aren't tracked yet. Browser opening is disabled in demo mode.
+Newly watched repository missing? Press `b`, then `r`. For custom GitHub subscriptions or any accessible repository, press `+` in Repos and enter `owner/repo` or its GitHub URL. Local tracking survives refreshes. Press Enter, then `x` to remove local tracking; GitHub subscriptions stay unchanged, so watched repos remain visible. Adding repositories and browser opening are disabled in demo mode. Releases aren't tracked yet.
 
 ## Development
 

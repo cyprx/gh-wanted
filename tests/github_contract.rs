@@ -48,6 +48,21 @@ fn empty_subscriptions_are_valid() {
 }
 
 #[test]
+fn tracking_reads_one_repository_without_changing_subscriptions() {
+    let (_dir, client) = fake(
+        r#"
+[ "$1" = api ] && [ "$2" = --hostname ] && [ "$3" = github.com ] && [ "$4" = repos/nats-io/nats-server ] && [ "$#" = 4 ] || exit 2
+printf '%s' '{"id":7,"full_name":"nats-io/nats-server","description":null,"topics":[],"archived":false}'
+"#,
+        Duration::from_secs(2),
+    );
+    assert_eq!(client.repository("nats-io/nats-server").unwrap().id, 7);
+    assert!(client.repository("https://evil.com/a/b").is_err());
+    let (_dir, client) = fake("echo 'HTTP 404' >&2; exit 1", Duration::from_secs(2));
+    assert!(client.repository("missing/private").is_err());
+}
+
+#[test]
 fn refresh_metrics_capture_pagination_account_overhead_and_safe_results() {
     let (dir, client) = fake(&response("[[],[]]"), Duration::from_secs(2));
     let path = dir.path().join("metrics.jsonl");

@@ -14,6 +14,7 @@ pub enum Mode {
     Tags,
     IssueSearch,
     SaveFocus,
+    TrackRepository,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,6 +59,7 @@ pub struct App {
     pub focuses: Vec<crate::focus::Focus>,
     pub detail_scroll: u16,
     pub repositories: Vec<Repository>,
+    pub tracked: std::collections::HashSet<u64>,
     pub tags: HashMap<u64, Vec<String>>,
     pub account: Option<Account>,
     pub selected: usize,
@@ -82,6 +84,7 @@ pub enum Action {
     OpenRepository(String),
     FetchActivity,
     FetchReviews(u64, u64),
+    TrackRepository(String),
 }
 
 impl App {
@@ -114,6 +117,7 @@ impl App {
             focuses: vec![],
             detail_scroll: 0,
             repositories: vec![],
+            tracked: std::collections::HashSet::new(),
             tags: HashMap::new(),
             account: None,
             selected: 0,
@@ -287,11 +291,47 @@ impl App {
         self.account = Some(account);
         self.focuses = self.store.focuses(id)?;
         self.repositories = self.store.repositories(id)?;
+        self.tracked = self.store.tracked_ids(id)?;
         self.load_tags()?;
         self.load_activity()?;
         self.status = "Refreshing repositories…".into();
         Ok(())
     }
+    pub fn apply_tracked(&mut self, account: u64, repo: Repository) -> Result<()> {
+        anyhow::ensure!(
+            self.account.as_ref().map(|a| a.id) == Some(account),
+            "Account changed; repository was not tracked"
+        );
+        let id = repo.id;
+        let name = repo.full_name.clone();
+        self.store.track_repository(account, &repo)?;
+        self.repositories = self.store.repositories(account)?;
+        self.tracked = self.store.tracked_ids(account)?;
+        self.load_tags()?;
+        self.load_activity()?;
+        self.next_refresh = 0;
+        if self.view == View::Repositories {
+            self.selected = self
+                .visible()
+                .iter()
+                .position(|i| self.repositories[*i].id == id)
+                .unwrap_or(0);
+        }
+        self.status = format!(
+            "Tracking {name} locally{}",
+            if self
+                .visible()
+                .iter()
+                .any(|i| self.repositories[*i].id == id)
+            {
+                ""
+            } else {
+                " (hidden by repository filter)"
+            }
+        );
+        Ok(())
+    }
+
     fn load_tags(&mut self) -> Result<()> {
         let Some(account) = &self.account else {
             return Ok(());
@@ -318,7 +358,8 @@ impl App {
         let selected_id = self.current().map(|r| r.id);
         self.store
             .replace_repositories(snapshot.account.id, &snapshot.repositories)?;
-        self.repositories = snapshot.repositories;
+        self.repositories = self.store.repositories(snapshot.account.id)?;
+        self.tracked = self.store.tracked_ids(snapshot.account.id)?;
         self.load_tags()?;
         self.selected = selected_id
             .and_then(|id| {
@@ -331,7 +372,7 @@ impl App {
             self.selected = 0;
         }
         self.status = format!(
-            "{} watched repositories • {}",
+            "{} repositories • {}",
             self.repositories.len(),
             if self.demo {
                 "Demo: temporary data"
@@ -378,6 +419,13 @@ impl App {
                 }
             }
             KeyCode::Enter => {
+                if self.mode == Mode::TrackRepository {
+                    let name = crate::repositories::parse_repository(&self.input)?;
+                    anyhow::ensure!(!self.busy, "Wait for repository loading to finish");
+                    self.mode = Mode::Browse;
+                    self.input.clear();
+                    return Ok(Action::TrackRepository(name));
+                }
                 if self.mode == Mode::Search {
                     self.query = self.input.trim().to_owned();
                     self.selected = 0;
@@ -473,6 +521,30 @@ impl App {
 
     fn handle_repo_key(&mut self, code: KeyCode) -> Result<Action> {
         match code {
+            KeyCode::Char('+') => {
+                anyhow::ensure!(
+                    self.account.is_some(),
+                    "Connect before tracking a repository"
+                );
+                self.start_editor(Mode::TrackRepository, String::new());
+            }
+            KeyCode::Char('x') if self.pane == Pane::Details => {
+                if let (Some(account), Some(repo)) = (&self.account, self.current()) {
+                    let (account, id) = (account.id, repo.id);
+                    anyhow::ensure!(self.tracked.contains(&id), "This repository is watched on GitHub; there is no local tracking to remove");
+                    self.store.untrack_repository(account, id)?;
+                    self.repositories = self.store.repositories(account)?;
+                    self.tracked = self.store.tracked_ids(account)?;
+                    self.load_tags()?;
+                    self.selected = self.selected.min(self.visible().len().saturating_sub(1));
+                    self.status = if self.repositories.iter().any(|r| r.id == id) {
+                        "Local tracking removed; still watched on GitHub"
+                    } else {
+                        "Local tracking removed; GitHub subscriptions unchanged"
+                    }
+                    .into();
+                }
+            }
             KeyCode::Char('r') => return Ok(Action::Refresh),
             KeyCode::Char('s') => self.start_editor(Mode::SaveFocus, String::new()),
             KeyCode::Char('/') => self.start_editor(Mode::Search, self.query.clone()),

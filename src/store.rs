@@ -42,7 +42,7 @@ impl Store {
                 );
                 PRAGMA user_version = 1;",
             )?,
-            1..=3 => {}
+            1..=4 => {}
             _ => bail!("Unsupported repository database schema version {version}"),
         }
         transaction
@@ -70,6 +70,17 @@ impl Store {
         }
         transaction.prepare("SELECT host, account, repo_id, event_key, event_json, acknowledged FROM activity LIMIT 0")?;
         transaction.prepare("SELECT host, account, repo_id, feed, initial_since, checkpoint, error, retry_at, paused FROM activity_feeds LIMIT 0")?;
+        if version < 4 {
+            transaction.execute_batch(
+                "CREATE TABLE tracked_repositories (
+                host TEXT NOT NULL, account TEXT NOT NULL, repo_id TEXT NOT NULL,
+                repository_json TEXT NOT NULL, PRIMARY KEY(host, account, repo_id));
+                PRAGMA user_version = 4;",
+            )?;
+        }
+        transaction.prepare(
+            "SELECT host, account, repo_id, repository_json FROM tracked_repositories LIMIT 0",
+        )?;
         transaction.commit()?;
         Ok(Self { connection })
     }
@@ -100,7 +111,9 @@ impl Store {
 
     pub fn repositories(&self, account: u64) -> Result<Vec<Repository>> {
         let mut statement = self.connection.prepare(
-            "SELECT repository_json FROM repositories WHERE host = 'github.com' AND account = ?1 ORDER BY repo_id",
+            "SELECT repository_json FROM repositories WHERE host = 'github.com' AND account = ?1
+             UNION ALL SELECT repository_json FROM tracked_repositories t WHERE host = 'github.com' AND account = ?1
+             AND NOT EXISTS (SELECT 1 FROM repositories r WHERE r.host=t.host AND r.account=t.account AND r.repo_id=t.repo_id)",
         )?;
         let rows = statement.query_map([account.to_string()], |row| row.get::<_, String>(0))?;
         let mut repositories = Vec::new();
@@ -129,8 +142,33 @@ impl Store {
                 "INSERT INTO repositories (host, account, repo_id, repository_json) VALUES ('github.com', ?1, ?2, ?3)",
                 params![account, repo.id.to_string(), serde_json::to_string(repo)?],
             )?;
+            transaction.execute(
+                "UPDATE tracked_repositories SET repository_json=?3 WHERE host='github.com' AND account=?1 AND repo_id=?2",
+                params![account, repo.id.to_string(), serde_json::to_string(repo)?],
+            )?;
         }
         transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn track_repository(&mut self, account: u64, repo: &Repository) -> Result<()> {
+        self.connection.execute("INSERT INTO tracked_repositories(host,account,repo_id,repository_json)
+            VALUES('github.com',?1,?2,?3) ON CONFLICT(host,account,repo_id) DO UPDATE SET repository_json=excluded.repository_json",
+            params![account.to_string(),repo.id.to_string(),serde_json::to_string(repo)?])?;
+        Ok(())
+    }
+
+    pub fn tracked_ids(&self, account: u64) -> Result<std::collections::HashSet<u64>> {
+        let mut statement = self.connection.prepare(
+            "SELECT repo_id FROM tracked_repositories WHERE host='github.com' AND account=?1",
+        )?;
+        let rows = statement.query_map([account.to_string()], |row| row.get::<_, String>(0))?;
+        rows.map(|row| Ok(row?.parse::<u64>()?)).collect()
+    }
+
+    pub fn untrack_repository(&mut self, account: u64, repo_id: u64) -> Result<()> {
+        self.connection.execute("DELETE FROM tracked_repositories WHERE host='github.com' AND account=?1 AND repo_id=?2",
+            params![account.to_string(),repo_id.to_string()])?;
         Ok(())
     }
 
