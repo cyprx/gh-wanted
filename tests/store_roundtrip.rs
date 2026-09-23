@@ -62,13 +62,13 @@ fn rejects_corrupt_and_future_databases_without_reset() -> anyhow::Result<()> {
     let future = directory.path().join("future.sqlite3");
     {
         let connection = Connection::open(&future)?;
-        connection.execute_batch("CREATE TABLE sentinel (value TEXT); INSERT INTO sentinel VALUES ('keep'); PRAGMA user_version = 4;")?;
+        connection.execute_batch("CREATE TABLE sentinel (value TEXT); INSERT INTO sentinel VALUES ('keep'); PRAGMA user_version = 5;")?;
     }
     assert!(Store::open(&future).is_err());
     let connection = Connection::open(&future)?;
     assert_eq!(
         connection.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?,
-        4
+        5
     );
     assert_eq!(
         connection.query_row("SELECT value FROM sentinel", [], |r| r.get::<_, String>(0))?,

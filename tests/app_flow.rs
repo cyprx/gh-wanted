@@ -145,7 +145,7 @@ fn today_landing_distinguishes_connection_empty_loading_and_failure() {
     .unwrap();
     app.busy = false;
     let empty = screen(&app);
-    assert!(empty.contains("No watched repositories yet"));
+    assert!(empty.contains("No repositories yet"));
     assert!(empty.find("d Today").unwrap() < empty.find("i Issues").unwrap());
     assert!(empty.find("i Issues").unwrap() < empty.find("b Repos").unwrap());
     app.repositories.push(Repository {

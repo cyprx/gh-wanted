@@ -191,7 +191,15 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
 
 fn draw_shortcuts(frame: &mut Frame, app: &App, area: Rect) {
     let pairs = match app.view {
+        View::Repositories if app.pane == Pane::Details => vec![
+            ("Esc", "list"),
+            ("o", "open"),
+            ("t", "tags"),
+            ("+", "track"),
+            ("x", "untrack local"),
+        ],
         View::Repositories => vec![
+            ("+", "track"),
             ("j/k", "move"),
             ("/", "filter"),
             ("t", "tags"),
@@ -282,7 +290,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_header(frame, app, rows[0]);
     draw_shortcuts(frame, app, rows[4]);
     if app.help {
-        frame.render_widget(Paragraph::new("j/k or arrows move. Tab details. PgUp/PgDn scroll. q/Ctrl-C quit.\nb repositories; / filters topic:rust tag:priority; t edits local tags.\ni issues; / filters label:\"good first issue\" state:open unassigned keyword.\nLabels use AND; state is open/closed/all; keywords search title/body.\ns saves both filters; f lists focuses; Enter reopens one.\nd Today and catch-up across the current repository filter.\na toggles acknowledgment locally. Opening/refreshing never marks read.\nu toggles unread-only. Older unread items remain in catch-up.\ne shows per-feed errors/checkpoints; PgUp/PgDn scroll; e returns.\nv loads reviews for the selected PR change/review on demand.\no opens a validated GitHub URL. r refreshes the current view.\nActivity refreshes every 15 minutes while running, without overlapping.\nAuth failures pause automatic refresh; rate-limit retry times are honored.\nFirst activity sync covers 24h. Checkpoints survive restart.\nLocal tags, focuses, and read state stay on this machine.\nAny key closes help.").wrap(Wrap { trim: false }).block(panel("", false).title(" Help ")), rows[1]);
+        frame.render_widget(Paragraph::new("j/k or arrows move. Tab details. PgUp/PgDn scroll. q/Ctrl-C quit.\nb repositories; + tracks owner/repo; x removes local tracking in Details.\n/ filters topic:rust tag:priority; t edits local tags.\ni issues; / filters label:\"good first issue\" state:open unassigned keyword.\nLabels use AND; state is open/closed/all; keywords search title/body.\ns saves both filters; f lists focuses; Enter reopens one.\nd Today and catch-up across the current repository filter.\na toggles acknowledgment locally. Opening/refreshing never marks read.\nu toggles unread-only. Older unread items remain in catch-up.\ne shows per-feed errors/checkpoints; PgUp/PgDn scroll; e returns.\nv loads reviews for the selected PR change/review on demand.\no opens a validated GitHub URL. r refreshes the current view.\nActivity refreshes every 15 minutes while running, without overlapping.\nAuth failures pause automatic refresh; rate-limit retry times are honored.\nFirst activity sync covers 24h. Checkpoints survive restart.\nLocal tags, focuses, and read state stay on this machine.\nAny key closes help.").wrap(Wrap { trim: false }).block(panel("", false).title(" Help ")), rows[1]);
     } else if app.view == View::Activity {
         draw_activity(frame, app, rows[1]);
     } else if app.view != View::Repositories {
@@ -365,6 +373,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
                         heading(clean(&repo.full_name)),
                         metadata(if repo.archived {
                             "Archived repository"
+                        } else if app.tracked.contains(&repo.id) {
+                            "Locally tracked repository"
                         } else {
                             "Watched repository"
                         }),
@@ -407,6 +417,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
                         Line::from(""),
                         metadata("o  open in external browser"),
                     ]);
+                    if app.tracked.contains(&repo.id) {
+                        lines.push(metadata("x  remove local tracking (keeps GitHub watch)"));
+                    }
                     lines
                 })
                 .unwrap_or_else(|| vec![metadata("Select a repository to explore.")]);
@@ -440,6 +453,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
             " Save focus • unique name • Enter saves • Esc cancels ",
             app.input.as_str(),
         ),
+        Mode::TrackRepository => (
+            " Track repo • owner/repo or GitHub URL • Enter adds • Esc cancels ",
+            app.input.as_str(),
+        ),
         Mode::Browse => (" / Repository filter ", app.query.as_str()),
         Mode::Search => (
             " Edit filter • Enter applies • Esc cancels ",
@@ -454,7 +471,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         if app.view == View::Issues {
             "All open issues  /  label:\"good first issue\" unassigned".into()
         } else {
-            "All watched repositories  /  topic:rust tag:priority".into()
+            "All repositories  /  topic:rust tag:priority".into()
         }
     } else {
         clean(input)
@@ -548,7 +565,7 @@ fn draw_discovery(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                             Line::from(""),
                             metadata("REPOSITORIES"),
                             Line::from(if focus.repository_query.is_empty() {
-                                "All watched repositories".into()
+                                "All repositories".into()
                             } else {
                                 clean(&focus.repository_query)
                             }),
@@ -624,7 +641,7 @@ fn draw_discovery(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                     "Press r to load issues".into()
                 }
             } else if app.query.is_empty() {
-                "All watched repositories".into()
+                "All repositories".into()
             } else {
                 format!("Repositories: {}", clean(&app.query))
             }),
@@ -857,7 +874,7 @@ fn draw_activity(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 if app.busy {
                     "Checking your watched repositories..."
                 } else {
-                    "No watched repositories yet. Watch a repository on GitHub, then press b and r to refresh your list."
+                    "No repositories yet. Press b, then + to track a repository, or r to reload your GitHub watch list."
                 }
             } else if ids.is_empty() {
                 "No repositories match. Press b to change repository filters."
