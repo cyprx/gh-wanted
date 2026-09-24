@@ -77,8 +77,8 @@ cargo test --locked
 CI checks Linux, Windows, and macOS. To publish, commit the version in `Cargo.toml` and `Cargo.lock`, then push a matching tag:
 
 ```sh
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.1
+git push origin v0.1.1
 ```
 
 The workflow checks the version, tests, builds, and publishes the GitHub Release with binary archives and checksums. Existing releases are never replaced. Manual runs of the Release workflow validate builds without publishing.
