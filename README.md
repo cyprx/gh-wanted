@@ -35,7 +35,13 @@ gh auth login --hostname github.com
 gh-wanted
 ```
 
-Prefer building from source? With Rust **1.88+**, run `cargo install --locked --path .` from this repository.
+With Rust installed, you can also install from [crates.io](https://crates.io/crates/gh-wanted):
+
+```sh
+cargo install --locked gh-wanted
+```
+
+GitHub CLI is still required separately. To build a local checkout, run `cargo install --locked --path .` from this repository.
 A terminal of **100 × 30** or larger is recommended.
 
 ## Controls
