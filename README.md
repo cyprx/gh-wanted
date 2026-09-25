@@ -16,7 +16,21 @@ Refresh follows the active tab, pausing and resuming as you move. GitHub access 
 
 ## Get started
 
-Download an archive from [GitHub Releases](https://github.com/cyprx/gh-wanted/releases) for your platform:
+**Windows x86_64 (WinGet):**
+
+```sh
+winget install --id cyprx.gh-wanted --exact --source winget
+```
+
+**macOS Apple Silicon (14+) or Linux x86_64 (Homebrew):**
+
+```sh
+brew install cyprx/tap/gh-wanted
+```
+
+Both install GitHub CLI as a dependency. Linux requires glibc 2.35+. These packages currently provide **v0.1.0**; for **v0.1.1** with manual repository tracking, use Cargo below or GitHub Releases. Newly merged WinGet packages may take time to appear in its index.
+
+Alternatively, download an archive from [GitHub Releases](https://github.com/cyprx/gh-wanted/releases) for your platform:
 
 | Platform | Archive suffix |
 | --- | --- |
